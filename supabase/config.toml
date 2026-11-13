@@ -1,0 +1,4 @@
+# The writer function checks callers itself (worker secret or the user's login
+# token), so Supabase's automatic JWT check is turned off for it.
+[functions.writer]
+verify_jwt = false
