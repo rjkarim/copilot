@@ -9,6 +9,7 @@ import Dashboard from "./pages/Dashboard";
 import SitePage from "./pages/SitePage";
 import Settings from "./pages/Settings";
 import Profile from "./pages/Profile";
+import Stats from "./pages/Stats";
 
 function SetupNeeded() {
   return (
@@ -36,6 +37,7 @@ function Shell() {
             <span className="hidden sm:inline">AffiliWriter</span>
           </Link>
           <NavLink to="/" end className={link}>Dashboard</NavLink>
+          <NavLink to="/stats" className={link}>Statistics</NavLink>
           <NavLink to="/settings" className={link}>Settings</NavLink>
           <div className="ml-auto flex items-center gap-1">
             <NavLink to="/profile" className={link}>
@@ -55,6 +57,7 @@ function Shell() {
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/sites/:id" element={<SitePage />} />
+          <Route path="/stats" element={<Stats />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="*" element={<Navigate to="/" replace />} />

@@ -157,6 +157,7 @@ async function writeArticle(id: string) {
       }
 
       const report: Report = (step, progress) => set({ step, progress });
+      cfg._usage = { in: 0, out: 0 };
       const draft = a.type === "review"
         ? await writeReview(cfg, site, a.keyword, products, Number(a.product_count) || 5, a.include_faq !== false, report)
         : await writeInformative(cfg, site, a.keyword, a.include_faq !== false, report);
@@ -164,6 +165,8 @@ async function writeArticle(id: string) {
       html = draft.html;
       excerpt = draft.excerpt;
       await set({ title, content_html: html, word_count: countWords(html) });
+      // Separate update: if the token columns are missing, the article itself is still saved.
+      if (cfg._usage.out > 0) await set({ tokens_in: cfg._usage.in, tokens_out: cfg._usage.out });
     }
 
     // Cancelled while writing: stop here, post nothing to WordPress.
@@ -345,6 +348,11 @@ async function askOpenAI(cfg: Row, system: string, user: string): Promise<Row> {
     const detail = data?.error?.message ?? (typeof data?.error === "string" ? data.error : "request failed");
     // Names the address that was called, so a wrong base URL in Settings is easy to spot.
     throw new Error(`AI provider error (${res.status}) from ${new URL(base).host}, model ${cfg.openai_model}: ${detail}`);
+  }
+  // Add up the tokens the provider reports, for the Statistics page.
+  if (cfg._usage && data?.usage) {
+    cfg._usage.in += Number(data.usage.prompt_tokens) || 0;
+    cfg._usage.out += Number(data.usage.completion_tokens) || 0;
   }
   const text = String(data?.choices?.[0]?.message?.content ?? "");
   try {
