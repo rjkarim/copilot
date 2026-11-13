@@ -54,7 +54,17 @@ Open http://localhost:5173, create your account, then:
 2. **Dashboard > Add website** – WordPress URL, username, an *application password* (WordPress admin > Users > Profile > Application Passwords), and that website's own Amazon Creators API Credential ID, Secret, Version and tracking ID.
 3. Open the website, paste keywords (one per line), choose the category (loaded live from the website), article type and sleep time, and click **Start writing**.
 
-To put the app online, run `npm run build` and upload the `dist` folder to any static host (Vercel, Netlify, Cloudflare Pages) with the same two `VITE_` variables. Set the host to send every path to `index.html`.
+## Put it online (Vercel, free)
+
+The background writer already runs on Supabase, so only the web app needs hosting.
+
+1. Sign in at https://vercel.com with your GitHub account.
+2. **Add New > Project**, pick the `copilot` repository, click **Import**.
+3. Framework preset: **Vite** (detected automatically). Under **Environment Variables** add `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` with the same values as your `.env`.
+4. Click **Deploy**. You get an address like `https://copilot-xxxx.vercel.app`.
+5. In **Supabase > Authentication > URL Configuration**, set **Site URL** to that address and add it under **Redirect URLs**, so sign-up confirmation emails link to the live site.
+
+Every push to the `main` branch on GitHub redeploys the site automatically. To use your own domain, add it in **Vercel > Project > Settings > Domains** and repeat step 5 with it. `vercel.json` makes page links like `/settings` work when opened directly.
 
 ## How it works
 
