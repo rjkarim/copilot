@@ -125,11 +125,15 @@ export function StatusBadge({ status }: { status: keyof typeof badge }) {
 export function LiveStatus({ site }: { site: Site }) {
   if (site.writing > 0) {
     const pct = Math.max(5, site.current_progress ?? 5);
+    // Which article of the current list is being written, e.g. "Article 3 of 10".
+    const total = site.queued + site.writing + site.completed + site.failed;
+    const current = site.completed + site.failed + 1;
     return (
       <div>
         <div className="mb-1 flex items-center justify-between gap-2 text-xs">
           <span className="truncate font-medium text-indigo-700">
             <span className="mr-1.5 inline-block h-2 w-2 animate-pulse rounded-full bg-indigo-500" />
+            <span className="mr-1.5 rounded bg-indigo-100 px-1.5 py-0.5 font-semibold">Article {current} of {total}</span>
             {site.current_step ?? "Writing"}: {site.current_keyword}
           </span>
           <span className="tabular-nums text-slate-500">{pct}%</span>

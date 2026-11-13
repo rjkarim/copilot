@@ -1,5 +1,8 @@
-import { useState, type FormEvent } from "react";
-import { MARKETPLACES, supabase, syncSite, testConnection, type Site } from "../lib";
+import { useEffect, useState, type FormEvent } from "react";
+import {
+  addAmazonAccount, AMAZON_VERSIONS, loadAmazonAccounts, MARKETPLACES, supabase, syncSite, testConnection,
+  type AmazonAccount, type Site,
+} from "../lib";
 import { Button, Field, Input, Modal, Notice, Select } from "../ui";
 
 /** Add or edit a website. `site` is undefined when adding. */
@@ -11,16 +14,26 @@ export default function WebsiteForm({ site, onClose }: { site?: Site; onClose: (
     wp_app_password: "",
     tracking_id: site?.tracking_id ?? "",
     marketplace: site?.marketplace ?? "www.amazon.com",
-    language: site?.language ?? "English",
-    post_status: site?.post_status ?? "draft",
-    sleep_seconds: site?.sleep_seconds ?? 60,
-    amazon_credential_id: "",
-    amazon_credential_secret: "",
-    amazon_version: site?.amazon_version ?? "3.1",
   });
+  const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
+
+  // Amazon account: "" = none, "new" = add a new one below, otherwise a saved account's id.
+  const [accounts, setAccounts] = useState<AmazonAccount[]>([]);
+  const [accountId, setAccountId] = useState(site?.amazon_account_id ?? "");
+  const [acc, setAcc] = useState({ name: "", credential_id: "", credential_secret: "", version: "3.1" });
+  const setA = (k: keyof typeof acc) => (e: { target: { value: string } }) => setAcc({ ...acc, [k]: e.target.value });
+
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
+
+  useEffect(() => {
+    loadAmazonAccounts().then(({ accounts, error }) => {
+      setAccounts(accounts);
+      if (error) setError(error);
+      // New website: reuse the first saved account by default. No accounts yet: offer to add one.
+      setAccountId((cur) => cur || (accounts.length === 0 ? "new" : site ? "" : accounts[0].id));
+    });
+  }, []);
 
   type Result = { ok: boolean; text: string } | "testing" | null;
   const [wpTest, setWpTest] = useState<Result>(null);
@@ -29,8 +42,19 @@ export default function WebsiteForm({ site, onClose }: { site?: Site; onClose: (
   async function test(kind: "wordpress" | "amazon") {
     const setResult = kind === "wordpress" ? setWpTest : setAmzTest;
     setResult("testing");
-    const { name, language, post_status, sleep_seconds, ...fields } = f;
-    setResult(await testConnection(kind, site?.id, fields));
+    setResult(
+      await testConnection(kind, site?.id, {
+        url: f.url,
+        wp_username: f.wp_username,
+        wp_app_password: f.wp_app_password,
+        marketplace: f.marketplace,
+        tracking_id: f.tracking_id,
+        amazon_account_id: accountId,
+        amazon_credential_id: accountId === "new" ? acc.credential_id : "",
+        amazon_credential_secret: accountId === "new" ? acc.credential_secret : "",
+        amazon_version: accountId === "new" ? acc.version : "",
+      }),
+    );
   }
   const testRow = (kind: "wordpress" | "amazon", label: string, result: Result) => (
     <div className="space-y-2">
@@ -45,32 +69,40 @@ export default function WebsiteForm({ site, onClose }: { site?: Site; onClose: (
     e.preventDefault();
     setBusy(true);
     setError("");
-    const { wp_app_password, amazon_credential_id, amazon_credential_secret, ...rest } = f;
+    const fail = (message: string) => {
+      setError(
+        message.includes("schema cache") || message.includes("amazon_account")
+          ? "Database update needed: run supabase/migrations/005_amazon_accounts_and_faq.sql in the Supabase SQL Editor, then try again."
+          : message,
+      );
+      setBusy(false);
+    };
+
+    // A new Amazon account is saved first, so other websites can reuse it later.
+    let amazonAccountId: string | null = accountId && accountId !== "new" ? accountId : null;
+    if (accountId === "new" && (acc.credential_id.trim() || acc.credential_secret.trim())) {
+      const saved = await addAmazonAccount({ ...acc, name: acc.name || `Amazon API (${f.name.trim()})` });
+      if (!saved.id) return fail(saved.error ?? "Could not save the Amazon account.");
+      amazonAccountId = saved.id;
+      setAccountId(saved.id);
+    }
+
     const row: Record<string, unknown> = {
-      ...rest,
       name: f.name.trim(),
       url: f.url.trim().replace(/\/+$/, ""),
+      wp_username: f.wp_username.trim(),
       tracking_id: f.tracking_id.trim(),
-      sleep_seconds: Math.max(0, Number(f.sleep_seconds) || 0),
+      marketplace: f.marketplace,
+      amazon_account_id: amazonAccountId,
     };
-    // Secret fields are only sent when a new value was typed; empty means "keep".
-    if (wp_app_password.trim()) row.wp_app_password = wp_app_password.trim();
-    if (amazon_credential_id.trim()) row.amazon_credential_id = amazon_credential_id.trim();
-    if (amazon_credential_secret.trim()) row.amazon_credential_secret = amazon_credential_secret.trim();
+    // The password is only sent when a new value was typed; empty means "keep".
+    if (f.wp_app_password.trim()) row.wp_app_password = f.wp_app_password.trim();
 
     const id = site?.id ?? crypto.randomUUID();
     const { error } = site
       ? await supabase.from("websites").update(row).eq("id", id)
       : await supabase.from("websites").insert({ id, ...row });
-    if (error) {
-      setError(
-        error.message.includes("schema cache")
-          ? "Database update needed: run supabase/migrations/003_site_amazon_and_categories.sql in the Supabase SQL Editor, then try again."
-          : error.message,
-      );
-      setBusy(false);
-      return;
-    }
+    if (error) return fail(error.message);
     // Test the WordPress login and load post counts. The result shows on the website card.
     await syncSite(id);
     setBusy(false);
@@ -108,46 +140,50 @@ export default function WebsiteForm({ site, onClose }: { site?: Site; onClose: (
               placeholder="xxxx xxxx xxxx xxxx xxxx xxxx"
             />
           </Field>
-          <Field label="Article language">
-            <Input value={f.language} onChange={set("language")} required />
-          </Field>
-          <Field label="Post new articles as">
-            <Select value={f.post_status} onChange={set("post_status")}>
-              <option value="draft">Draft (review before publishing)</option>
-              <option value="publish">Published immediately</option>
-            </Select>
-          </Field>
-          <Field label="Sleep time after each article (seconds)" hint="Example: 300 = wait 5 minutes before the next keyword">
-            <Input type="number" min={0} value={f.sleep_seconds} onChange={set("sleep_seconds")} required />
-          </Field>
         </div>
         {testRow("wordpress", "Test WordPress connection", wpTest)}
 
         <div className="border-t border-slate-200 pt-4">
           <div className="text-sm font-semibold">Amazon for this website</div>
           <p className="mt-0.5 text-xs text-slate-500">
-            This website's own Creators API credentials and tracking ID. Needed for affiliate review articles only.
-            {site?.has_amazon_keys && " Credentials are saved — leave ID and Secret empty to keep them."}
+            Pick a saved Creators API account or add a new one. The tracking ID is this website's own. Needed for
+            affiliate review articles only.
           </p>
         </div>
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Creators API Credential ID">
-            <Input value={f.amazon_credential_id} onChange={set("amazon_credential_id")} autoComplete="off"
-              placeholder={site?.has_amazon_keys ? "•••••••• (saved)" : ""} />
-          </Field>
-          <Field label="Creators API Credential Secret">
-            <Input type="password" value={f.amazon_credential_secret} onChange={set("amazon_credential_secret")}
-              autoComplete="new-password" placeholder={site?.has_amazon_keys ? "•••••••• (saved)" : ""} />
-          </Field>
-          <Field label="Credential version" hint="Shown next to the credentials in Associates Central">
-            <Select value={f.amazon_version} onChange={set("amazon_version")}>
-              <option value="3.1">3.1 — North America (US, CA, MX, BR)</option>
-              <option value="3.2">3.2 — Europe, India, Middle East</option>
-              <option value="3.3">3.3 — Far East (JP, SG, AU)</option>
-              <option value="2.1">2.1 — North America (older credentials)</option>
-              <option value="2.2">2.2 — Europe (older credentials)</option>
-              <option value="2.3">2.3 — Far East (older credentials)</option>
-            </Select>
+          <div className="sm:col-span-2">
+            <Field label="Amazon Creators API account">
+              <Select value={accountId} onChange={(e) => setAccountId(e.target.value)}>
+                <option value="">None (informative articles only)</option>
+                {accounts.map((a) => (
+                  <option key={a.id} value={a.id}>{a.name} — version {a.version}</option>
+                ))}
+                <option value="new">+ Add a new Creators API account…</option>
+              </Select>
+            </Field>
+          </div>
+          {accountId === "new" && (
+            <>
+              <Field label="Account name" hint="Any label that helps you recognise it later">
+                <Input value={acc.name} onChange={setA("name")} placeholder="Main Associates account" />
+              </Field>
+              <Field label="Credential version" hint="Shown next to the credentials in Associates Central">
+                <Select value={acc.version} onChange={setA("version")}>
+                  {AMAZON_VERSIONS.map(([v, label]) => (
+                    <option key={v} value={v}>{label}</option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label="Creators API Credential ID">
+                <Input value={acc.credential_id} onChange={setA("credential_id")} autoComplete="off" />
+              </Field>
+              <Field label="Creators API Credential Secret">
+                <Input type="password" value={acc.credential_secret} onChange={setA("credential_secret")} autoComplete="new-password" />
+              </Field>
+            </>
+          )}
+          <Field label="Amazon tracking ID" hint="Used for every Amazon link on this website">
+            <Input value={f.tracking_id} onChange={set("tracking_id")} placeholder="mysite-20" />
           </Field>
           <Field label="Amazon marketplace">
             <Select value={f.marketplace} onChange={set("marketplace")}>
@@ -156,11 +192,9 @@ export default function WebsiteForm({ site, onClose }: { site?: Site; onClose: (
               ))}
             </Select>
           </Field>
-          <Field label="Amazon tracking ID" hint="Used for every Amazon link on this website">
-            <Input value={f.tracking_id} onChange={set("tracking_id")} placeholder="mysite-20" />
-          </Field>
         </div>
-        {testRow("amazon", "Test Amazon connection", amzTest)}
+        {accountId !== "" && testRow("amazon", "Test Amazon connection", amzTest)}
+
         <div className="flex justify-end gap-2 border-t border-slate-200 pt-4">
           <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
           <Button type="submit" disabled={busy}>{busy ? "Saving and testing…" : site ? "Save changes" : "Add website"}</Button>

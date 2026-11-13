@@ -36,7 +36,47 @@ export type Site = {
   current_progress: number | null;
   amazon_version: string;
   has_amazon_keys: boolean;
+  amazon_account_id: string | null;
 };
+
+/** A saved Amazon Creators API account (the ID and Secret are never readable here). */
+export type AmazonAccount = { id: string; name: string; version: string };
+
+export const AMAZON_VERSIONS = [
+  ["3.1", "3.1 — North America (US, CA, MX, BR)"],
+  ["3.2", "3.2 — Europe, India, Middle East"],
+  ["3.3", "3.3 — Far East (JP, SG, AU)"],
+  ["2.1", "2.1 — North America (older credentials)"],
+  ["2.2", "2.2 — Europe (older credentials)"],
+  ["2.3", "2.3 — Far East (older credentials)"],
+];
+
+export async function loadAmazonAccounts(): Promise<{ accounts: AmazonAccount[]; error: string | null }> {
+  const { data, error } = await supabase.from("amazon_accounts").select("id,name,version").order("created_at");
+  if (error) {
+    return {
+      accounts: [],
+      error: "Database update needed: run supabase/migrations/005_amazon_accounts_and_faq.sql in the Supabase SQL Editor, then reload.",
+    };
+  }
+  return { accounts: data as AmazonAccount[], error: null };
+}
+
+/** Saves a new Amazon account. Returns its id, or an error message. */
+export async function addAmazonAccount(a: {
+  name: string; credential_id: string; credential_secret: string; version: string;
+}): Promise<{ id?: string; error?: string }> {
+  if (!a.credential_id.trim() || !a.credential_secret.trim()) return { error: "Enter both the Credential ID and the Credential Secret." };
+  const id = crypto.randomUUID();
+  const { error } = await supabase.from("amazon_accounts").insert({
+    id,
+    name: a.name.trim() || "Amazon API account",
+    credential_id: a.credential_id.trim(),
+    credential_secret: a.credential_secret.trim(),
+    version: a.version,
+  });
+  return error ? { error: error.message } : { id };
+}
 
 export type Category = { id: number; name: string };
 

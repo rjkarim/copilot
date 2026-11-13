@@ -58,9 +58,17 @@ Deno.serve(async (req) => {
         .eq("id", body.website_id).eq("user_id", auth.user.id).maybeSingle();
       site = data ?? {};
     }
-    const allowed = ["url", "wp_username", "wp_app_password", "amazon_credential_id",
+    site.user_id = auth.user.id;
+    // "new" = the form is adding a new Amazon account: test the typed credentials, not saved ones.
+    if (body.fields?.amazon_account_id === "new") {
+      site.amazon_account_id = null;
+      site.amazon_credential_id = null;
+      site.amazon_credential_secret = null;
+    }
+    const allowed = ["url", "wp_username", "wp_app_password", "amazon_account_id", "amazon_credential_id",
       "amazon_credential_secret", "amazon_version", "marketplace", "tracking_id"];
     for (const k of allowed) {
+      if (k === "amazon_account_id" && body.fields?.[k] === "new") continue;
       const v = body.fields?.[k];
       if (typeof v === "string" && v.trim()) site[k] = v.trim();
     }
@@ -73,7 +81,6 @@ Deno.serve(async (req) => {
           error: `Logged in as ${me.name}, but this user is not allowed to publish posts. Use an Editor or Administrator account.`,
         });
       }
-      if (!site.amazon_credential_id || !site.amazon_credential_secret) throw new Error("Enter the Credential ID and Credential Secret first.");
       if (!site.tracking_id) throw new Error("Enter the Amazon tracking ID first.");
       const items = await searchAmazon(site, "water bottle");
       return json({ ok: true, message: `Connected to Amazon. A test search on ${site.marketplace} returned ${items.length} products for tracking ID ${site.tracking_id}.` });
@@ -144,7 +151,6 @@ async function writeArticle(id: string) {
       let products: Product[] = [];
       if (a.type === "review") {
         await set({ step: "Finding Amazon products", progress: 15 });
-        if (!site.has_amazon_keys) throw new Error("This website has no Amazon Creators API credentials. Edit the website and add them.");
         if (!site.tracking_id) throw new Error("This website has no Amazon tracking ID. Edit the website and add one.");
         products = await searchAmazon(site, a.keyword);
         if (products.length === 0) throw new Error(`Amazon returned no products for "${a.keyword}".`);
@@ -152,8 +158,8 @@ async function writeArticle(id: string) {
 
       const report: Report = (step, progress) => set({ step, progress });
       const draft = a.type === "review"
-        ? await writeReview(cfg, site, a.keyword, products, Number(a.product_count) || 5, report)
-        : await writeInformative(cfg, site, a.keyword, report);
+        ? await writeReview(cfg, site, a.keyword, products, Number(a.product_count) || 5, a.include_faq !== false, report)
+        : await writeInformative(cfg, site, a.keyword, a.include_faq !== false, report);
       title = draft.title;
       html = draft.html;
       excerpt = draft.excerpt;
@@ -209,6 +215,23 @@ const COGNITO: Record<string, string> = {
   "2.3": "https://creatorsapi.auth.us-west-2.amazoncognito.com/oauth2/token",
 };
 
+// A website uses one of the user's saved Amazon accounts (reusable across
+// websites). Older websites may still carry their own credentials.
+async function amazonCreds(site: Row): Promise<Row> {
+  if (site.amazon_account_id) {
+    const { data } = await admin.from("amazon_accounts").select("*")
+      .eq("id", site.amazon_account_id).eq("user_id", site.user_id).maybeSingle();
+    if (data) {
+      return {
+        amazon_credential_id: data.credential_id,
+        amazon_credential_secret: data.credential_secret,
+        amazon_version: data.version,
+      };
+    }
+  }
+  return site;
+}
+
 async function amazonAuthHeader(cfg: Row): Promise<string> {
   const v = String(cfg.amazon_version || "3.1");
   let res: Response;
@@ -235,7 +258,7 @@ async function amazonAuthHeader(cfg: Row): Promise<string> {
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.access_token) {
-    throw new Error(`Amazon login failed (${res.status}). Check this website's Credential ID, Secret and Version.`);
+    throw new Error(`Amazon login failed (${res.status}). Check the Credential ID, Secret and Version of the Amazon account.`);
   }
   return COGNITO[v] ? `Bearer ${data.access_token}, Version ${v}` : `Bearer ${data.access_token}`;
 }
@@ -243,7 +266,11 @@ async function amazonAuthHeader(cfg: Row): Promise<string> {
 // Each website has its own Creators API credentials and tracking ID.
 // One request fetches 10 products; the article later keeps the best few.
 async function searchAmazon(site: Row, keyword: string): Promise<Product[]> {
-  const authorization = await amazonAuthHeader(site);
+  const creds = await amazonCreds(site);
+  if (!creds.amazon_credential_id || !creds.amazon_credential_secret) {
+    throw new Error("This website has no Amazon Creators API account. Edit the website and choose or add one.");
+  }
+  const authorization = await amazonAuthHeader(creds);
   const base = ["images.primary.large", "itemInfo.title", "itemInfo.features", "itemInfo.byLineInfo"];
   const call = (resources: string[]) =>
     fetch("https://creatorsapi.amazon/catalog/v1/searchItems", {
@@ -328,41 +355,26 @@ async function askOpenAI(cfg: Row, system: string, user: string): Promise<Row> {
   }
 }
 
-// How every article should read. Shared by both article types.
+// How every article should read. Kept short on purpose: it is sent with every
+// AI request, so each extra line here costs tokens on every article.
 const STYLE = [
-  "You are a senior editor and subject-matter expert who has written buying guides and how-to articles for major publications for 15 years.",
-  "Write the way a knowledgeable person explains things to a friend: confident, specific, practical and honest.",
-  "",
-  "Writing quality:",
-  "- Lead with what the reader needs. No warm-up sentences, no restating the question.",
-  "- Be concrete. Explain what a feature means for the reader in real use instead of listing it.",
-  "- Mix short and longer sentences. Keep paragraphs to 2-4 sentences. Use active voice and address the reader as 'you'.",
-  "- Give honest trade-offs. Real experts point out who should NOT choose something.",
-  "- Never use filler or cliches such as: 'in today's world', 'look no further', 'game-changer', 'when it comes to', 'whether you are a beginner or a pro', 'dive in', 'unleash', 'elevate', 'in conclusion', 'it is important to note'.",
-  "- No exaggerated claims, no exclamation marks, no emojis.",
-  "",
-  "SEO:",
-  "- Use the exact keyword naturally in the title, in the first 100 words, and in one subheading. Elsewhere use natural variations and related terms. Never stuff keywords.",
-  "- Title: 50-60 characters, keyword near the start, clear benefit. Meta description: 140-155 characters, includes the keyword, reads like an invitation to click.",
-  "- Subheadings describe their section and match what people search for. Answer questions directly in the first sentence under a heading.",
-  "",
-  "Format: HTML fragments may only use these tags: p, h3, h4, ul, ol, li, strong, em, table, tr, th, td. Never use h1 or h2, links, images, markdown or code fences.",
-  "Reply with one JSON object only, exactly in the requested shape.",
+  "You are a veteran product reviewer and editor. Write like a knowledgeable friend: specific, practical, honest.",
+  "Rules: lead with what the reader needs; explain what a feature means in real use; vary sentence length; 2-4 sentences per paragraph; active voice; address the reader as 'you'; give honest trade-offs. No filler or cliches ('look no further', 'game-changer', 'when it comes to', 'dive in', 'elevate', 'in conclusion'), no hype, no exclamation marks, no emojis.",
+  "SEO: use the exact keyword naturally in the first 100 words and once in a subheading; elsewhere use natural variations. Never stuff keywords.",
+  "HTML fragments may use only: p, h3, ul, ol, li, strong, em. No h1 or h2, links, images or markdown.",
+  "Reply with one JSON object only, in the requested shape.",
 ].join("\n");
 
-const REVIEW_RULES = "\n\n" + [
-  "Product reviews:",
-  "- Use only the product facts you are given. Never invent prices, ratings, scores, test results, measurements, awards or specifications.",
-  "- Never claim you bought, tested or used a product. Write as an expert analysing the specifications and what they mean for the buyer.",
-  "- Say clearly who a product suits best and who should skip it. Every product must have real drawbacks, not disguised praise.",
-].join("\n");
+const REVIEW_RULES =
+  "\nUse only the product facts given. Never invent prices, ratings, test results or specifications, " +
+  "and never claim to have bought or tested a product. Drawbacks must be real.";
 
 type Draft = { title: string; html: string; excerpt: string };
 type Report = (step: string, progress: number) => Promise<unknown>;
 
-// An article is written as one short "plan" request followed by several small
-// requests that run at the same time (one per product or section). This is far
-// quicker than one huge request, and a slow or failed part is retried on its own.
+// An article is written as one short "plan" request followed by a few small
+// requests that run at the same time. This is far quicker than one huge request,
+// and a slow or failed part is retried on its own.
 async function inParallel<T>(jobs: (() => Promise<T>)[], report: Report): Promise<T[]> {
   let done = 0;
   return await Promise.all(jobs.map(async (job) => {
@@ -379,59 +391,64 @@ async function inParallel<T>(jobs: (() => Promise<T>)[], report: Report): Promis
   }));
 }
 
+const para = (text: unknown) => (text ? `<p>${esc(String(text))}</p>\n` : "");
+
 function faqHtml(heading: unknown, faq: unknown) {
   if (!Array.isArray(faq) || faq.length === 0) return "";
   return `<h2>${esc(String(heading || "Frequently Asked Questions"))}</h2>\n` +
     faq.map((f: Row) => `<h3>${esc(String(f.q ?? ""))}</h3>\n<p>${esc(String(f.a ?? ""))}</p>`).join("\n") + "\n";
 }
+const FAQ_SHAPE = `"faq": [{"q": string, "a": string (30-50 words, direct answer first)}] (5 real questions people ask), `;
 
-async function writeInformative(cfg: Row, site: Row, keyword: string, report: Report): Promise<Draft> {
+async function writeInformative(cfg: Row, site: Row, keyword: string, withFaq: boolean, report: Report): Promise<Draft> {
   await report("Planning article", 35);
   const plan = await askOpenAI(
     cfg,
     STYLE,
-    `Plan an in-depth informative article in ${site.language} for the keyword "${keyword}". ` +
-      `Cover what a searcher of this keyword actually wants to know, in the order they need it.\n\n` +
-      `JSON shape:\n` +
-      `{"title": string, "meta_description": string,\n` +
-      ` "intro_html": string (2 short paragraphs; answer the main question straight away),\n` +
-      ` "outline": [{"heading": string, "brief": string (one sentence: what this section must cover)}] (6-8 sections, no FAQ or conclusion),\n` +
-      ` "faq_heading": string, "conclusion_heading": string}`,
+    `Plan an informative article in ${site.language} for the keyword "${keyword}". ` +
+      `Cover what a searcher of this keyword wants to know, in the order they need it.\n` +
+      `JSON shape: {"title": string (creative and specific, 50-62 characters, keyword near the start), ` +
+      `"meta_description": string (140-155 characters, includes the keyword), ` +
+      `"intro_html": string (3-5 short paragraphs; answer the main question straight away), ` +
+      `"outline": [{"heading": string, "brief": string (max 20 words: what the section covers)}] (5-6 sections, no FAQ or conclusion), ` +
+      (withFaq ? `"faq_heading": string, ` : "") + `"conclusion_heading": string}`,
   );
   if (!plan.title || !Array.isArray(plan.outline) || plan.outline.length === 0) {
     throw new Error("The AI returned an incomplete article plan. Retry the keyword.");
   }
-  const outline: Row[] = plan.outline.slice(0, 8);
-  const context = `Article: "${plan.title}" (keyword "${keyword}", language ${site.language}).\n` +
-    `Full outline, for context only: ${outline.map((s) => s.heading).join(" | ")}\n\n`;
+  const outline: Row[] = plan.outline.slice(0, 6);
+  const context = `Article "${plan.title}", keyword "${keyword}", language ${site.language}. ` +
+    `Sections: ${outline.map((s) => s.heading).join(" | ")}\n`;
 
   const [closing, ...sections] = await inParallel<Row>([
     () => askOpenAI(cfg, STYLE,
-      context + `Write the FAQ and the conclusion.\n` +
-        `JSON shape: {"faq": [{"q": string, "a": string (40-70 words, direct answer first)}] (5-6 real questions people ask, not already answered by the outline), ` +
-        `"conclusion_html": string (short; the key takeaway and a next step)}`),
+      context + `Write the closing parts.\nJSON shape: {` + (withFaq ? FAQ_SHAPE : "") +
+        `"conclusion_html": string (60-90 words: the key takeaway and a next step)}`),
     ...outline.map((s) => () => askOpenAI(cfg, STYLE,
-      context + `Write only the section "${s.heading}". It must cover: ${s.brief}\n` +
-        `Do not repeat the heading and do not cover the other sections.\n` +
-        `JSON shape: {"html": string (150-250 words; use h3, lists or a table where they help)}`)),
+      context + `Write only the section "${s.heading}" (${s.brief}). Do not repeat the heading or cover other sections.\n` +
+        `JSON shape: {"html": string (130-200 words; use h3 or a list where it helps)}`)),
   ], report);
 
   let html = `${plan.intro_html ?? ""}\n`;
   outline.forEach((s, i) => { html += `<h2>${esc(String(s.heading ?? ""))}</h2>\n${sections[i]?.html ?? ""}\n`; });
-  html += faqHtml(plan.faq_heading, closing.faq);
+  if (withFaq) html += faqHtml(plan.faq_heading, closing.faq);
   html += `<h2>${esc(String(plan.conclusion_heading || "Final Thoughts"))}</h2>\n${closing.conclusion_html ?? ""}`;
   return { title: String(plan.title), html, excerpt: String(plan.meta_description ?? "") };
 }
 
-// Review layout: intro, "at a glance" table, numbered detailed reviews (image,
-// button, rating, review, likes, improvements, verdict), buying guide, FAQ, conclusion.
+// Review layout: intro (3-5 paragraphs), "at a glance" table, numbered reviews
+// (image, button, one detail paragraph, likes, improvements, one closing
+// paragraph), buying guide, optional FAQ, conclusion.
 async function writeReview(
-  cfg: Row, site: Row, keyword: string, products: Product[], wanted: number, report: Report,
+  cfg: Row, site: Row, keyword: string, products: Product[], wanted: number, withFaq: boolean, report: Report,
 ): Promise<Draft> {
   const count = Math.max(1, Math.min(wanted, products.length, 10));
-  const facts = (p: Product) => ({
-    asin: p.asin, name: p.title, brand: p.brand, features: p.features,
-    ...(p.rating ? { customer_rating: p.rating, customer_reviews: p.reviews } : {}),
+  const english = /^english$/i.test(String(site.language).trim());
+  // Product facts are trimmed: long feature lists cost tokens without improving the text.
+  const facts = (p: Product, features: number, chars: number) => ({
+    asin: p.asin, name: p.title.slice(0, 140), brand: p.brand,
+    features: p.features.slice(0, features).map((f) => f.slice(0, chars)),
+    ...(p.rating ? { rating: p.rating, reviews: p.reviews } : {}),
   });
 
   // 1) Plan: choose the best products and write the short framing parts.
@@ -439,23 +456,20 @@ async function writeReview(
   const plan = await askOpenAI(
     cfg,
     STYLE + REVIEW_RULES,
-    `Plan a "best of" product review article in ${site.language} for the keyword "${keyword}".\n\n` +
-      `From the ${products.length} Amazon products below, pick the ${count} best for this keyword. ` +
-      `They must truly match the keyword, be clearly different from each other (no colour or size variants of the same item), ` +
-      `and cover different needs or budgets. Prefer better customer ratings when given. Order them best first. Keep each asin exactly as given.\n\n` +
-      `Products:\n${JSON.stringify(products.map((p) => ({ ...facts(p), features: p.features.slice(0, 5) })))}\n\n` +
-      `JSON shape:\n` +
-      `{"title": string (for example "Top ${count} ...: Reviews & Buyer's Guide", in ${site.language}),\n` +
-      ` "meta_description": string,\n` +
-      ` "intro_html": string (2-3 short paragraphs: the buyer's problem, what matters when choosing, what this guide covers),\n` +
-      ` "glance_heading": string (like "Our Top ${count} <keyword> Recommendations at a Glance"),\n` +
-      ` "reviews_heading": string (like "Top ${count} <keyword> Detailed Reviews"),\n` +
-      ` "buying_guide_heading": string (like "The Ultimate Buying Guide: <keyword>"),\n` +
-      ` "faq_heading": string, "conclusion_heading": string,\n` +
-      ` "labels": {"product": string, "rating": string, "view_on_amazon": string, "check_price": string, "what_we_like": string, "what_could_be_improved": string} (these UI words in ${site.language}),\n` +
-      ` "picks": [{"asin": string, "name": string (clean short product name with brand, max 65 characters), ` +
-      `"best_for": string (max 6 words, e.g. "Best for long rides"), ` +
-      `"angle": string (one sentence: what sets it apart from the other picks)}] (exactly ${count})}`,
+    `Plan a product roundup in ${site.language} for the keyword "${keyword}".\n` +
+      `Pick the ${count} best of these Amazon products: they must match the keyword, differ from each other ` +
+      `(no colour or size variants) and cover different needs or budgets. Best first. Keep each asin exactly.\n` +
+      `Products: ${JSON.stringify(products.map((p) => facts(p, 4, 110)))}\n` +
+      `JSON shape: {"title": string (creative, click-worthy and SEO-friendly, 50-65 characters; it MUST contain the number ${count} ` +
+      `and the keyword, in a pattern such as "Top ${count} ...", "${count} Best ..." or "${count} ... Picks for ..."; add a specific benefit or audience, no generic "Reviews & Buyer's Guide" ending), ` +
+      `"meta_description": string (140-155 characters, includes the keyword and the number ${count}), ` +
+      `"intro_html": string (3-5 short paragraphs: the buyer's problem, what matters when choosing, how these picks were selected, what the guide covers), ` +
+      `"glance_heading": string (like "Our Top ${count} <keyword> Picks at a Glance"), ` +
+      `"reviews_heading": string (like "Top ${count} <keyword>: Detailed Reviews"), ` +
+      `"buying_guide_heading": string, ` + (withFaq ? `"faq_heading": string, ` : "") + `"conclusion_heading": string, ` +
+      (english ? "" : `"labels": {"product": string, "rating": string, "view_on_amazon": string, "check_price": string, "what_we_like": string, "what_could_be_improved": string} (these UI words in ${site.language}), `) +
+      `"picks": [{"asin": string, "name": string (clean short product name with brand, max 65 characters), ` +
+      `"best_for": string (max 6 words), "angle": string (max 18 words: what sets it apart from the other picks)}] (exactly ${count})}`,
   );
   if (!plan.title || !Array.isArray(plan.picks)) throw new Error("The AI returned an incomplete article plan. Retry the keyword.");
 
@@ -467,27 +481,23 @@ async function writeReview(
   }
   if (picks.length === 0) throw new Error("The AI did not choose any of the Amazon products. Retry the keyword.");
   const name = (x: { p: Product; r: Row }) => esc(String(x.r.name ?? x.p.title).slice(0, 90));
-  const lineup = picks.map((x, i) => `${i + 1}. ${x.r.name ?? x.p.title} (${x.r.best_for ?? ""})`).join("\n");
-  const context = `Article: "${plan.title}" (keyword "${keyword}", language ${site.language}).\nProducts in the article:\n${lineup}\n\n`;
+  const context = `Article "${plan.title}", keyword "${keyword}", language ${site.language}. Picks: ` +
+    picks.map((x, i) => `${i + 1}) ${x.r.name ?? x.p.title} - ${x.r.best_for ?? ""}`).join("; ") + "\n";
 
-  // 2) Everything else at the same time: one request per product, plus guide and FAQ.
-  const [guide, closing, ...reviews] = await inParallel<Row>([
+  // 2) Everything else at the same time: one small request per product, plus one for the closing parts.
+  const [closing, ...reviews] = await inParallel<Row>([
     () => askOpenAI(cfg, STYLE + REVIEW_RULES,
-      context + `Write the buying guide section. Its heading is "${plan.buying_guide_heading}" - do not repeat it. ` +
-        `Explain how to choose in general; do not review the individual products.\n` +
-        `JSON shape: {"buying_guide_html": string (500-700 words; 4-6 h3 subsections on the factors that decide a good purchase, with lists where useful)}`),
-    () => askOpenAI(cfg, STYLE + REVIEW_RULES,
-      context + `Write the FAQ and the conclusion.\n` +
-        `JSON shape: {"faq": [{"q": string, "a": string (40-70 words, direct answer first)}] (6-8 real buyer questions about this kind of product), ` +
-        `"conclusion_html": string (short: best overall pick, best budget or alternative pick, and why)}`),
+      context + `Write the closing parts. The buying guide explains how to choose in general; it does not review the picks.\n` +
+        `JSON shape: {"buying_guide_html": string (300-400 words; 3-4 h3 subsections on the factors that decide a good purchase), ` +
+        (withFaq ? FAQ_SHAPE : "") +
+        `"conclusion_html": string (60-90 words: best overall pick, best alternative, and why)}`),
     ...picks.map((x) => () => askOpenAI(cfg, STYLE + REVIEW_RULES,
-      context + `Write the detailed review of this one product only: ${x.r.name ?? x.p.title}.\n` +
-        `Its place in the article: ${x.r.best_for ?? ""}. ${x.r.angle ?? ""}\n` +
-        `Product facts:\n${JSON.stringify(facts(x.p))}\n\n` +
-        `JSON shape: {"review_html": string (2 paragraphs, 110-150 words: what it is, the features that matter and why, who it suits), ` +
-        `"likes": string[] (4-6 specific benefits, each one short sentence), ` +
+      context + `Write the review of this one pick only (${x.r.angle ?? ""}).\n` +
+        `Facts: ${JSON.stringify(facts(x.p, 6, 200))}\n` +
+        `JSON shape: {"detail": string (ONE paragraph of plain text, 70-100 words: what it is, the features that matter and what they mean in use), ` +
+        `"likes": string[] (4-5 specific benefits, each a short sentence), ` +
         `"improvements": string[] (2-3 honest drawbacks), ` +
-        `"verdict": string (1-2 sentences: who should buy it)}`)),
+        `"closing": string (ONE paragraph of plain text, 35-55 words: who should buy it and who should skip it)}`)),
   ], report);
 
   // 3) Build the page.
@@ -526,14 +536,14 @@ async function writeReview(
     }
     html += `<p style="text-align:center">${link(x.p, esc(L.view_on_amazon), button)}</p>\n`;
     if (x.p.rating) html += `<p style="text-align:center"><strong>${esc(L.rating)}: ${stars(x.p)}</strong></p>\n`;
-    html += `${r.review_html ?? ""}\n`;
+    html += para(r.detail);
     html += `<p><strong>${esc(L.what_we_like)}:</strong></p>\n<ul>${li(r.likes)}</ul>\n`;
     html += `<p><strong>${esc(L.what_could_be_improved)}:</strong></p>\n<ul>${li(r.improvements)}</ul>\n`;
-    if (r.verdict) html += `<p>${esc(String(r.verdict))}</p>\n`;
+    html += para(r.closing);
   });
 
-  html += `<h2>${esc(String(plan.buying_guide_heading || "Buying Guide"))}</h2>\n${guide.buying_guide_html ?? ""}\n`;
-  html += faqHtml(plan.faq_heading, closing.faq);
+  html += `<h2>${esc(String(plan.buying_guide_heading || "Buying Guide"))}</h2>\n${closing.buying_guide_html ?? ""}\n`;
+  if (withFaq) html += faqHtml(plan.faq_heading, closing.faq);
   html += `<h2>${esc(String(plan.conclusion_heading || "Final Verdict"))}</h2>\n${closing.conclusion_html ?? ""}`;
   return { title: String(plan.title), html, excerpt: String(plan.meta_description ?? "") };
 }

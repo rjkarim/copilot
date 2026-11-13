@@ -9,7 +9,7 @@ Articles are written one by one in the background by Supabase, so they keep goin
 Copy `.env.example` to `.env` and paste the two values from **Supabase Dashboard > Project Settings > API** (Project URL and the `anon` public key).
 
 ### 2. Create the database
-Open **Supabase Dashboard > SQL Editor**, paste the whole of `supabase/migrations/001_init.sql`, and click **Run**. Then do the same with `002_ai_base_url.sql`, `003_site_amazon_and_categories.sql` and `004_product_count.sql`, in that order.
+Open **Supabase Dashboard > SQL Editor**, paste the whole of `supabase/migrations/001_init.sql`, and click **Run**. Then do the same with `002_ai_base_url.sql`, `003_site_amazon_and_categories.sql`, `004_product_count.sql` and `005_amazon_accounts_and_faq.sql`, in that order.
 
 ### 3. Deploy the background writer
 Pick a long random text to use as the worker secret (for example 40 random letters and numbers). Then, in this folder:

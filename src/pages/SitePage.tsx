@@ -204,6 +204,7 @@ function KeywordForm({ site, onDone }: { site: Site; onDone: () => void }) {
   const [categories, setCategories] = useState<Category[]>([]);
   const [categoryId, setCategoryId] = useState("");
   const [productCount, setProductCount] = useState("5");
+  const [includeFaq, setIncludeFaq] = useState(true);
   const [catState, setCatState] = useState<"loading" | "ready" | string>("loading");
 
   // Categories come straight from the WordPress site each time this page opens.
@@ -235,6 +236,7 @@ function KeywordForm({ site, onDone }: { site: Site; onDone: () => void }) {
         keyword,
         type,
         product_count: Math.min(10, Math.max(1, Math.round(Number(productCount)) || 5)),
+        include_faq: includeFaq,
         wp_category_id: category?.id ?? null,
         wp_category_name: category?.name ?? null,
       }));
@@ -244,7 +246,9 @@ function KeywordForm({ site, onDone }: { site: Site; onDone: () => void }) {
     if (error) {
       const text = error.message.includes("product_count")
         ? "Database update needed: run supabase/migrations/004_product_count.sql in the Supabase SQL Editor, then try again."
-        : error.message;
+        : error.message.includes("include_faq")
+          ? "Database update needed: run supabase/migrations/005_amazon_accounts_and_faq.sql in the Supabase SQL Editor, then try again."
+          : error.message;
       return setMsg({ kind: "error", text });
     }
     setText("");
@@ -312,6 +316,11 @@ function KeywordForm({ site, onDone }: { site: Site; onDone: () => void }) {
             </Select>
           </Field>
         </div>
+        <label className="flex items-center gap-2 text-sm text-slate-700">
+          <input type="checkbox" checked={includeFaq} onChange={(e) => setIncludeFaq(e.target.checked)}
+            className="h-4 w-4 rounded border-slate-300 accent-indigo-600" />
+          Include an FAQ section in each article
+        </label>
         <div className="flex items-center justify-between gap-3">
           <span className="text-sm text-slate-500">{keywords.length} keyword{keywords.length === 1 ? "" : "s"} ready</span>
           <Button type="submit" disabled={busy || keywords.length === 0}>

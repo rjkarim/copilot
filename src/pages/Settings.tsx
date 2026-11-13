@@ -1,6 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { supabase, testConnection, useSession } from "../lib";
-import { Button, Card, Field, Input, Notice } from "../ui";
+import {
+  addAmazonAccount, AMAZON_VERSIONS, loadAmazonAccounts, supabase, testConnection, useSession, type AmazonAccount,
+} from "../lib";
+import { Button, Card, ConfirmDialog, Field, Input, Notice, Select, type ConfirmRequest } from "../ui";
 
 type Saved = { openai_model: string; openai_base_url: string; has_openai_key: boolean };
 const DEFAULT_BASE = "https://api.openai.com/v1";
@@ -64,7 +66,8 @@ export default function Settings() {
   }
 
   return (
-    <form onSubmit={save} className="mx-auto max-w-2xl space-y-6">
+    <div className="mx-auto max-w-2xl space-y-6">
+    <form onSubmit={save} className="space-y-6">
       <h1 className="text-xl font-semibold">Settings</h1>
       {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
       <Notice kind="info">
@@ -99,12 +102,99 @@ export default function Settings() {
         </div>
       </Card>
 
-      <Card className="p-5 text-sm text-slate-600">
-        <span className="font-semibold text-slate-800">Amazon Creators API</span> — credentials and tracking ID are set
-        separately on each website. Open the dashboard and click <span className="font-medium">Edit</span> on a website.
-      </Card>
-
       <Button type="submit" disabled={busy}>{busy ? "Saving…" : "Save settings"}</Button>
     </form>
+    <AmazonAccounts />
+    </div>
+  );
+}
+
+/** Saved Creators API accounts: add once here (or in the website form), reuse on any website. */
+function AmazonAccounts() {
+  const [accounts, setAccounts] = useState<AmazonAccount[]>([]);
+  const [acc, setAcc] = useState({ name: "", credential_id: "", credential_secret: "", version: "3.1" });
+  const [msg, setMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [ask, setAsk] = useState<ConfirmRequest | null>(null);
+  const setA = (k: keyof typeof acc) => (e: { target: { value: string } }) => setAcc({ ...acc, [k]: e.target.value });
+
+  async function load() {
+    const res = await loadAmazonAccounts();
+    setAccounts(res.accounts);
+    if (res.error) setMsg({ kind: "error", text: res.error });
+  }
+  useEffect(() => {
+    load();
+  }, []);
+
+  async function add(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    const saved = await addAmazonAccount(acc);
+    setBusy(false);
+    if (!saved.id) return setMsg({ kind: "error", text: saved.error ?? "Could not save the account." });
+    setAcc({ name: "", credential_id: "", credential_secret: "", version: acc.version });
+    setMsg({ kind: "ok", text: "Amazon account saved. Choose it on a website with Edit on the dashboard." });
+    load();
+  }
+  function remove(a: AmazonAccount) {
+    setAsk({
+      title: `Delete ${a.name}?`,
+      message: "Websites using this Amazon account will have no account until you pick another one, and their review articles will fail. It cannot be undone.",
+      label: "Delete account",
+      run: async () => {
+        const { error } = await supabase.from("amazon_accounts").delete().eq("id", a.id);
+        await load();
+        return error?.message ?? null;
+      },
+    });
+  }
+
+  return (
+    <Card className="space-y-4 p-5">
+      <div>
+        <h2 className="font-semibold">Amazon Creators API accounts</h2>
+        <p className="mt-0.5 text-sm text-slate-500">
+          Save an account once and reuse it on as many websites as you like. Each website keeps its own tracking ID.
+        </p>
+      </div>
+      {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
+      {accounts.length > 0 && (
+        <ul className="divide-y divide-slate-100 rounded-lg border border-slate-200">
+          {accounts.map((a) => (
+            <li key={a.id} className="flex items-center justify-between gap-3 px-3 py-2.5">
+              <div className="min-w-0">
+                <div className="truncate text-sm font-medium">{a.name}</div>
+                <div className="text-xs text-slate-500">Version {a.version} · credentials saved</div>
+              </div>
+              <Button variant="danger" onClick={() => remove(a)}>Delete</Button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <form onSubmit={add} className="space-y-4 border-t border-slate-200 pt-4">
+        <div className="text-sm font-medium">Add a new account</div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Account name">
+            <Input value={acc.name} onChange={setA("name")} required placeholder="Main Associates account" />
+          </Field>
+          <Field label="Credential version">
+            <Select value={acc.version} onChange={setA("version")}>
+              {AMAZON_VERSIONS.map(([v, label]) => (
+                <option key={v} value={v}>{label}</option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Credential ID">
+            <Input value={acc.credential_id} onChange={setA("credential_id")} required autoComplete="off" />
+          </Field>
+          <Field label="Credential Secret">
+            <Input type="password" value={acc.credential_secret} onChange={setA("credential_secret")} required autoComplete="new-password" />
+          </Field>
+        </div>
+        <Button type="submit" variant="ghost" disabled={busy}>{busy ? "Saving…" : "Add account"}</Button>
+      </form>
+      {ask && <ConfirmDialog request={ask} onClose={() => setAsk(null)} />}
+    </Card>
   );
 }
