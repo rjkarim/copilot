@@ -52,7 +52,7 @@ export default function Profile() {
 
       <Card className="flex items-center justify-between p-5">
         <div className="text-sm text-slate-600">Articles keep being written after you log out.</div>
-        <Button variant="ghost" onClick={() => supabase.auth.signOut()}>Log out</Button>
+        <Button variant="ghost" onClick={() => supabase.auth.signOut({ scope: "local" })}>Log out</Button>
       </Card>
     </div>
   );

@@ -193,6 +193,15 @@ export async function testConnection(
   return data?.ok ? { ok: true, text: data.message } : { ok: false, text: data?.error ?? "Test failed." };
 }
 
+/** Saves a website's sleep time; it takes effect immediately. Returns an error message or null. */
+export async function saveSleep(websiteId: string, lane: "new" | "update", seconds: number): Promise<string | null> {
+  const { data, error } = await supabase.functions.invoke("writer", {
+    body: { action: "set_sleep", website_id: websiteId, lane, seconds },
+  });
+  if (error) return writerError(error);
+  return data?.ok ? null : (data?.error ?? "Could not save the sleep time.");
+}
+
 export function sleepLabel(seconds: number) {
   if (seconds < 60) return `${seconds}s`;
   if (seconds % 3600 === 0) return `${seconds / 3600}h`;

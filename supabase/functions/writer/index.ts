@@ -114,6 +114,30 @@ Deno.serve(async (req) => {
       return json({ ok: false, error: String(e instanceof Error ? e.message : e).slice(0, 400) });
     }
   }
+  // Change a website's sleep time. It takes effect from this moment: the wait
+  // that is already running is re-timed from when the last article finished.
+  if (body.action === "set_sleep") {
+    const { data: site } = await admin.from("websites").select("id")
+      .eq("id", body.website_id).eq("user_id", auth.user.id).maybeSingle();
+    if (!site) return json({ ok: false, error: "Website not found." });
+    const kind = body.lane === "update" ? "update" : "new";
+    const seconds = Math.max(0, Math.min(86400 * 7, Math.round(Number(body.seconds)) || 0));
+    const patch: Row = kind === "new" ? { sleep_seconds: seconds } : { update_sleep_seconds: seconds };
+    const { data: busy } = await admin.from("articles").select("id")
+      .eq("website_id", site.id).eq("kind", kind).eq("status", "writing").limit(1).maybeSingle();
+    let next: string | null = null;
+    // While an article is being written, the new sleep time simply applies when it finishes.
+    if (!busy) {
+      const { data: last } = await admin.from("articles").select("finished_at")
+        .eq("website_id", site.id).eq("kind", kind).not("finished_at", "is", null)
+        .order("finished_at", { ascending: false }).limit(1).maybeSingle();
+      const finished = last?.finished_at ? new Date(last.finished_at).getTime() : 0;
+      next = new Date(Math.max(Date.now(), finished + seconds * 1000)).toISOString();
+      patch[kind === "new" ? "next_run_at" : "update_next_run_at"] = next;
+    }
+    const { error } = await admin.from("websites").update(patch).eq("id", site.id);
+    return json(error ? { ok: false, error: error.message } : { ok: true, seconds, next });
+  }
   if (body.action === "categories") {
     const { data: site } = await admin.from("websites").select("*")
       .eq("id", body.website_id).eq("user_id", auth.user.id).maybeSingle();
@@ -176,8 +200,8 @@ async function writeArticle(id: string) {
         ? await writeReview(cfg, site, keyword, products, Number(a.product_count) || 5, a.include_faq !== false, report)
         : await writeInformative(cfg, site, keyword, a.include_faq !== false, report);
       title = capitalize(noYear(draft.title));
-      // Updated posts use the H2 tag only once; every later heading moves one level down.
-      html = isUpdate ? singleH2(draft.html) : draft.html;
+      // Every article uses the H2 tag only once; each later heading moves one level down.
+      html = singleH2(draft.html);
       excerpt = draft.excerpt;
       await set({ title, content_html: html, word_count: countWords(html) });
       // Separate update: if the token columns are missing, the article itself is still saved.
@@ -209,12 +233,16 @@ async function writeArticle(id: string) {
     // Sleep time: this website's next keyword may not start before this moment.
     // (Not after a cancel, so a retry can start straight away.)
     const wake = (seconds: number) => new Date(Date.now() + seconds * 1000).toISOString();
+    // Read the sleep time again: it may have been changed while this article was being written.
+    const { data: fresh } = await admin.from("websites")
+      .select("sleep_seconds,update_sleep_seconds").eq("id", site.id).maybeSingle();
+    const now = fresh ?? site;
     if (isUpdate) {
       // The update lane has its own sleep time. After a cancel it may continue straight away.
       await admin.from("websites")
-        .update({ update_next_run_at: wake(cancelled ? 0 : site.update_sleep_seconds) }).eq("id", site.id);
+        .update({ update_next_run_at: wake(cancelled ? 0 : now.update_sleep_seconds) }).eq("id", site.id);
     } else if (!cancelled) {
-      await admin.from("websites").update({ next_run_at: wake(site.sleep_seconds) }).eq("id", site.id);
+      await admin.from("websites").update({ next_run_at: wake(now.sleep_seconds) }).eq("id", site.id);
     }
   }
 }

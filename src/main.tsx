@@ -45,7 +45,8 @@ function Shell() {
               <span className="sm:hidden">Profile</span>
             </NavLink>
             <button
-              onClick={() => supabase.auth.signOut()}
+              // "local": log out here only, so other devices and tabs stay signed in.
+              onClick={() => supabase.auth.signOut({ scope: "local" })}
               className="rounded-lg px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-100"
             >
               Log out

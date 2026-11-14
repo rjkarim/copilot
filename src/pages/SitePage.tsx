@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Link, useParams } from "react-router-dom";
-import { fetchCategories, supabase, useLive, type Article, type Category, type Site } from "../lib";
+import { fetchCategories, saveSleep, sleepLabel, supabase, useLive, type Article, type Category, type Site } from "../lib";
 import { Button, Card, ConfirmDialog, Field, Input, LiveStatus, Modal, Notice, Select, StatusBadge, Textarea, type ConfirmRequest } from "../ui";
 
 const COLS =
@@ -138,6 +138,7 @@ export default function SitePage() {
             <div className="mb-2 text-sm font-medium">Live progress</div>
             <LiveStatus site={site} />
             {site.wp_error && <div className="mt-3"><Notice kind="error">WordPress: {site.wp_error}</Notice></div>}
+            <SleepSetting site={site} lane="new" onDone={load} />
           </Card>
           <KeywordForm site={site} onDone={load} />
         </>
@@ -226,6 +227,43 @@ export default function SitePage() {
           />
         </Modal>
       )}
+    </div>
+  );
+}
+
+/** Sleep time with its own Save button. Can be changed at any moment; applies from the click. */
+function SleepSetting({ site, lane, onDone }: { site: Site; lane: "new" | "update"; onDone: () => void }) {
+  const saved = lane === "new" ? site.sleep_seconds : site.update_sleep_seconds;
+  const [value, setValue] = useState(String(saved ?? 60));
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const seconds = Math.max(0, Math.round(Number(value)) || 0);
+
+  async function save() {
+    setBusy(true);
+    const problem = await saveSleep(site.id, lane, seconds);
+    setBusy(false);
+    setMsg(problem ? { kind: "error", text: problem } : { kind: "ok", text: `Saved. Sleep time is now ${sleepLabel(seconds)}, effective from now.` });
+    onDone();
+  }
+  return (
+    <div className="mt-4 border-t border-slate-200 pt-4">
+      <div className="flex flex-wrap items-end gap-2">
+        <label className="block">
+          <span className="mb-1 block text-sm font-medium text-slate-700">
+            Sleep after each {lane === "new" ? "article" : "update"} (seconds)
+          </span>
+          <Input type="number" min={0} value={value} className="w-40"
+            onChange={(e) => { setValue(e.target.value); setMsg(null); }} />
+        </label>
+        <Button variant={seconds === saved ? "ghost" : "primary"} onClick={save} disabled={busy}>
+          {busy ? "Saving…" : "Save"}
+        </Button>
+        <span className="pb-2 text-xs text-slate-500">
+          Currently {sleepLabel(saved ?? 0)}. You can change it at any time, also while articles are being written.
+        </span>
+      </div>
+      {msg && <div className="mt-2"><Notice kind={msg.kind}>{msg.text}</Notice></div>}
     </div>
   );
 }
@@ -347,7 +385,17 @@ function UpdatePanel({ site, onDone, confirm }: { site: Site; onDone: () => void
         {site.update_enabled ? (
           <>
             <Button variant="danger" onClick={stop}>Stop updating</Button>
-            <Button variant="ghost" onClick={async () => setError((await save(settings())) ?? "")}>Save settings</Button>
+            <Button
+              variant="ghost"
+              onClick={async () => {
+                // The sleep time is re-timed by the writer so it applies from this moment.
+                const problem = (await save(settings())) ?? (await saveSleep(site.id, "update", settings().update_sleep_seconds));
+                setError(problem ?? "");
+                onDone();
+              }}
+            >
+              Save settings
+            </Button>
           </>
         ) : (
           <Button onClick={start} disabled={needsDb}>Start updating</Button>
@@ -362,7 +410,6 @@ function UpdatePanel({ site, onDone, confirm }: { site: Site; onDone: () => void
 function KeywordForm({ site, onDone }: { site: Site; onDone: () => void }) {
   const [text, setText] = useState("");
   const [type, setType] = useState<"review" | "informative">("review");
-  const [sleep, setSleep] = useState(String(site.sleep_seconds));
   const [postStatus, setPostStatus] = useState(site.post_status);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
@@ -390,9 +437,8 @@ function KeywordForm({ site, onDone }: { site: Site; onDone: () => void }) {
     if (keywords.length === 0) return;
     setBusy(true);
     setMsg(null);
-    const sleepSeconds = Math.max(0, Number(sleep) || 0);
     const { error: siteError } = await supabase.from("websites")
-      .update({ sleep_seconds: sleepSeconds, post_status: postStatus }).eq("id", site.id);
+      .update({ post_status: postStatus }).eq("id", site.id);
     let error = siteError;
     for (let i = 0; !error && i < keywords.length; i += 500) {
       const category = categories.find((c) => String(c.id) === categoryId);
@@ -470,9 +516,6 @@ function KeywordForm({ site, onDone }: { site: Site; onDone: () => void }) {
           >
             <Input type="number" min={1} max={10} value={productCount} disabled={type !== "review"}
               onChange={(e) => setProductCount(e.target.value)} />
-          </Field>
-          <Field label="Sleep after each article (seconds)">
-            <Input type="number" min={0} value={sleep} onChange={(e) => setSleep(e.target.value)} />
           </Field>
           <Field label="Post to WordPress as">
             <Select value={postStatus} onChange={(e) => setPostStatus(e.target.value as typeof postStatus)}>
