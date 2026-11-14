@@ -175,7 +175,7 @@ async function writeArticle(id: string) {
       const draft = a.type === "review"
         ? await writeReview(cfg, site, keyword, products, Number(a.product_count) || 5, a.include_faq !== false, report)
         : await writeInformative(cfg, site, keyword, a.include_faq !== false, report);
-      title = noYear(draft.title);
+      title = capitalize(noYear(draft.title));
       // Updated posts use the H2 tag only once; every later heading moves one level down.
       html = isUpdate ? singleH2(draft.html) : draft.html;
       excerpt = draft.excerpt;
@@ -258,6 +258,15 @@ function noYear(title: string): string {
     .replace(/\s*\b(in|of|for)\s+\(?(19|20)\d{2}\)?(?=\W|$)/gi, "")
     .replace(/\s*[\[(]?\b(19|20)\d{2}\b[\])]?/g, "")
     .replace(/\s+([:,!?])/g, "$1").replace(/\s{2,}/g, " ").replace(/^[\s:,-]+|[\s:,-]+$/g, "");
+}
+
+/**
+ * Capitalize Case: every word of a title starts with a capital letter, also after a
+ * hyphen ("top-rated" -> "Top-Rated"). Words with their own capitals (USB, iPhone) are kept.
+ */
+function capitalize(title: string): string {
+  return title.replace(/[^\s-]+/g, (word) =>
+    /[A-Z]/.test(word.slice(1)) ? word : word.replace(/\p{L}/u, (c) => c.toUpperCase()));
 }
 
 /** "which is the best camping lantern" -> "camping lantern" (what to search on Amazon). */
@@ -608,7 +617,7 @@ async function writeInformative(cfg: Row, site: Row, keyword: string, withFaq: b
     STYLE,
     `Plan an informative article in ${site.language} for the keyword "${keyword}". ` +
       `Cover what a searcher of this keyword wants to know, in the order they need it.\n` +
-      `JSON shape: {"title": string (creative and specific, 50-62 characters, keyword near the start), ` +
+      `JSON shape: {"title": string (creative and specific, 50-62 characters, keyword near the start, every word capitalised), ` +
       `"meta_description": string (140-155 characters, includes the keyword), ` +
       `"intro_html": string (3-5 short paragraphs; answer the main question straight away), ` +
       `"outline": [{"heading": string, "brief": string (max 20 words: what the section covers)}] (5-6 sections, no FAQ or conclusion), ` +
@@ -637,6 +646,27 @@ async function writeInformative(cfg: Row, site: Row, keyword: string, withFaq: b
   return { title: String(plan.title), html, excerpt: String(plan.meta_description ?? "") };
 }
 
+// Numbered title patterns. One is picked at random for each article, so a
+// website's titles do not all start with "Top N". <kw> is the keyword.
+const TITLE_PATTERNS = [
+  `"N Best <kw> for ..."`,
+  `"Top N <kw> for ..."`,
+  `"N <kw> Picks for ..."`,
+  `"Top N <kw> Picks ..."`,
+  `"The N Best <kw> ..."`,
+  `"Best <kw>: N Top Picks for ..."`,
+  `"N Top-Rated <kw> for ..."`,
+  `"N <kw> Worth Buying for ..."`,
+  `"<kw>: N Best Options for ..."`,
+  `"N Best <kw> That ..."`,
+  `"Our N Favorite <kw> for ..."`,
+  `"N Must-Have <kw> for ..."`,
+];
+function titlePattern(count: number): string {
+  const pick = TITLE_PATTERNS[Math.floor(Math.random() * TITLE_PATTERNS.length)];
+  return pick.replace(/\bN\b/g, String(count));
+}
+
 // Review layout: intro (3-5 paragraphs), "at a glance" table, numbered reviews
 // (image, button, one detail paragraph, likes, improvements, one closing
 // paragraph), buying guide, optional FAQ, conclusion.
@@ -661,8 +691,10 @@ async function writeReview(
       `Pick the ${count} best of these Amazon products: they must match the keyword, differ from each other ` +
       `(no colour or size variants) and cover different needs or budgets. Best first. Keep each asin exactly.\n` +
       `Products: ${JSON.stringify(products.map((p) => facts(p, 4, 110)))}\n` +
-      `JSON shape: {"title": string (creative, click-worthy and SEO-friendly, 50-65 characters; it MUST contain the number ${count} ` +
-      `and the keyword, in a pattern such as "Top ${count} ...", "${count} Best ..." or "${count} ... Picks for ..."; add a specific benefit or audience, no generic "Reviews & Buyer's Guide" ending), ` +
+      `JSON shape: {"title": string (creative, click-worthy and SEO-friendly, 50-65 characters, every word capitalised; ` +
+      `it MUST contain the number ${count} and the keyword, and it MUST follow this pattern: ${titlePattern(count)} ` +
+      `Fill the "..." with a specific benefit, use or audience that fits these products; do not repeat a word such as "Best" twice; ` +
+      `no generic "Reviews & Buyer's Guide" ending), ` +
       `"meta_description": string (140-155 characters, includes the keyword and the number ${count}), ` +
       `"intro_html": string (3-5 short paragraphs: the buyer's problem, what matters when choosing, how these picks were selected, what the guide covers), ` +
       `"glance_heading": string (like "Our Top ${count} <keyword> Picks at a Glance"), ` +
