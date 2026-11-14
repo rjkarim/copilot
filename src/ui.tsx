@@ -1,8 +1,43 @@
 import { useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes } from "react";
 import type { Site } from "./lib";
 
+/** Sun / moon button that switches between light and dark mode and remembers the choice. */
+export function ThemeToggle({ className = "" }: { className?: string }) {
+  const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
+  function toggle() {
+    const next = !dark;
+    document.documentElement.classList.toggle("dark", next);
+    try {
+      localStorage.setItem("theme", next ? "dark" : "light");
+    } catch {
+      /* private mode: the choice just isn't remembered */
+    }
+    setDark(next);
+  }
+  return (
+    <button
+      onClick={toggle}
+      title={dark ? "Switch to light mode" : "Switch to dark mode"}
+      aria-label={dark ? "Switch to light mode" : "Switch to dark mode"}
+      className={`rounded-lg p-2 text-slate-600 hover:bg-slate-100 ${className}`}
+    >
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        {dark ? (
+          <>
+            <circle cx="12" cy="12" r="4" />
+            <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+          </>
+        ) : (
+          <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />
+        )}
+      </svg>
+    </button>
+  );
+}
+
+// Solid button colours are written as fixed values so they look the same in light and dark mode.
 const variants = {
-  primary: "bg-indigo-600 text-white hover:bg-indigo-700",
+  primary: "bg-indigo-600 text-white hover:bg-[#4338ca]",
   ghost: "bg-white text-slate-700 border border-slate-300 hover:bg-slate-50",
   danger: "bg-white text-red-600 border border-red-200 hover:bg-red-50",
 };
@@ -60,7 +95,7 @@ export function Notice({ kind, children }: { kind: "error" | "ok" | "info"; chil
 
 export function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/50 p-4 sm:p-8" onMouseDown={onClose}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4 sm:p-8" onMouseDown={onClose}>
       <div className="w-full max-w-2xl rounded-xl bg-white shadow-xl" onMouseDown={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3.5">
           <h2 className="font-semibold">{title}</h2>
@@ -97,14 +132,14 @@ export function ConfirmDialog({ request, onClose }: { request: ConfirmRequest; o
     else onClose();
   }
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/50 p-4" onMouseDown={onClose}>
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4" onMouseDown={onClose}>
       <div role="alertdialog" aria-modal="true" className="w-full max-w-md rounded-xl bg-white p-5 shadow-xl" onMouseDown={(e) => e.stopPropagation()}>
         <h2 className="font-semibold">{request.title}</h2>
         <p className="mt-2 whitespace-pre-line text-sm text-slate-600">{request.message}</p>
         {error && <div className="mt-3"><Notice kind="error">{error}</Notice></div>}
         <div className="mt-5 flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
-          <Button onClick={go} disabled={busy} className="!bg-red-600 hover:!bg-red-700">
+          <Button onClick={go} disabled={busy} className="!bg-[#dc2626] hover:!bg-[#b91c1c]">
             {busy ? (request.busyLabel ?? "Deleting…") : request.label}
           </Button>
         </div>

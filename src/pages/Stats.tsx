@@ -229,11 +229,11 @@ function Timeline({ buckets, noun }: { buckets: Bucket[]; noun: string }) {
         {buckets.map((b, i) => (
           <div key={i} className="relative flex h-full flex-1 items-end" onMouseEnter={() => setHover(i)}>
             <div
-              className={`w-full rounded-t ${hover === i ? "bg-indigo-700" : "bg-indigo-500"}`}
+              className={`w-full rounded-t ${hover === i ? "bg-[#4338ca]" : "bg-indigo-500"}`}
               style={{ height: b.completed ? `max(3px, ${(b.completed / max) * 100}%)` : 0 }}
             />
             {hover === i && (
-              <div className={`pointer-events-none absolute bottom-full z-10 mb-1 whitespace-nowrap rounded-md bg-slate-900 px-2 py-1 text-xs text-white shadow ${i > buckets.length / 2 ? "right-0" : "left-0"}`}>
+              <div className={`pointer-events-none absolute bottom-full z-10 mb-1 whitespace-nowrap rounded-md bg-[#0f172a] px-2 py-1 text-xs text-white shadow ring-1 ring-white/10 ${i > buckets.length / 2 ? "right-0" : "left-0"}`}>
                 <span className="font-semibold tabular-nums">{b.completed}</span> {noun}{b.completed === 1 ? "" : "s"} · {b.label}
               </div>
             )}

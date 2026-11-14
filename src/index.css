@@ -4,6 +4,57 @@ body {
   @apply bg-slate-50 text-slate-800 antialiased;
 }
 
+/*
+  Dark mode. Every colour in the app comes from Tailwind's colour variables, so
+  the dark theme is made by giving those variables dark-mode values here. No
+  screen needs its own dark styles. The theme is switched by the "dark" class on
+  <html> (see ThemeToggle in ui.tsx and the small script in index.html).
+*/
+html.dark {
+  color-scheme: dark;
+
+  /* Surfaces and text: the grey scale runs the other way round. */
+  --color-white: #131c2e;      /* cards, inputs, header */
+  --color-slate-50: #0a101c;   /* page background */
+  --color-slate-100: #1c2740;
+  --color-slate-200: #263350;  /* borders */
+  --color-slate-300: #36456a;
+  --color-slate-400: #7586a3;
+  --color-slate-500: #98a6bd;
+  --color-slate-600: #c3cddc;
+  --color-slate-700: #dbe2ec;
+  --color-slate-800: #e9eef5;  /* main text */
+  --color-slate-900: #f6f8fb;
+
+  /* Tinted panels (notices, badges) become dark tints; their text becomes light. */
+  --color-indigo-50: #1b1f4a;
+  --color-indigo-100: #272c66;
+  --color-indigo-200: #3b3f8f;
+  --color-indigo-700: #b4bcff;
+
+  --color-red-50: #3a1418;
+  --color-red-100: #4d1b21;
+  --color-red-200: #7a2a32;
+  --color-red-600: #ff9d9d;
+  --color-red-700: #ffb4b4;
+
+  --color-emerald-50: #0a2e22;
+  --color-emerald-100: #0f3d2d;
+  --color-emerald-200: #1b5a43;
+  --color-emerald-600: #5fe0ac;
+  --color-emerald-700: #7be8bd;
+
+  --color-amber-50: #33270a;
+  --color-amber-600: #f5c451;
+  --color-amber-700: #f8d27a;
+
+  --color-sky-600: #7cc8f5;
+}
+/* Text on solid coloured buttons stays white in both themes. */
+html.dark .text-white {
+  color: #ffffff;
+}
+
 @keyframes stripes {
   to {
     background-position: 1rem 0;

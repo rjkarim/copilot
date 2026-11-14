@@ -156,6 +156,12 @@ Deno.serve(async (req) => {
 // deno-lint-ignore no-explicit-any
 type Row = Record<string, any>;
 
+// Errors that are retried automatically: anything from the AI provider, timeouts,
+// and dropped network connections (to the AI, Amazon or WordPress).
+const RETRYABLE = /^(AI provider error|The AI |Could not reach the AI|Timed out)|error sending request|connection closed|connection reset|network error|fetch failed/i;
+// First try plus three automatic retries; after that the keyword is listed under Failed.
+const MAX_ATTEMPTS = 4;
+
 async function writeArticle(id: string) {
   const { data: a } = await admin.from("articles").select("*").eq("id", id).maybeSingle();
   if (!a || a.status !== "writing") return;
@@ -170,6 +176,8 @@ async function writeArticle(id: string) {
     return data?.status === "writing" && data.attempts === a.attempts;
   };
   let cancelled = false;
+  // Set when the normal sleep time should not apply: 30 before an automatic retry, 0 after a deleted keyword.
+  let waitSeconds: number | null = null;
   // "update" = rewrite an existing WordPress post in place; "new" = create a post.
   const isUpdate = a.kind === "update";
   // The main keyword (for an old post: the words of its URL) drives the title and the text.
@@ -224,11 +232,21 @@ async function writeArticle(id: string) {
     });
     await syncCounts(site);
   } catch (e) {
-    await set({
-      status: "failed", step: null,
-      error: String(e instanceof Error ? e.message : e).slice(0, 600),
-      finished_at: new Date().toISOString(),
-    });
+    const message = String(e instanceof Error ? e.message : e).slice(0, 600);
+    if (!isUpdate && message.startsWith("Amazon returned no products")) {
+      // Nothing to review for this keyword: remove it instead of listing it under Failed.
+      await admin.from("articles").delete().eq("id", id).eq("status", "writing").eq("attempts", a.attempts);
+      waitSeconds = 0;
+    } else if (RETRYABLE.test(message) && a.attempts < MAX_ATTEMPTS) {
+      // AI errors and timeouts are usually temporary: put it back in the queue and try again in 30 seconds.
+      await set({
+        status: "queued", step: null, progress: 0, finished_at: null,
+        error: `Retrying automatically in 30 seconds (attempt ${a.attempts + 1} of ${MAX_ATTEMPTS}). Last error: ${message}`.slice(0, 600),
+      });
+      waitSeconds = 30;
+    } else {
+      await set({ status: "failed", step: null, error: message, finished_at: new Date().toISOString() });
+    }
   } finally {
     // Sleep time: this website's next keyword may not start before this moment.
     // (Not after a cancel, so a retry can start straight away.)
@@ -240,9 +258,9 @@ async function writeArticle(id: string) {
     if (isUpdate) {
       // The update lane has its own sleep time. After a cancel it may continue straight away.
       await admin.from("websites")
-        .update({ update_next_run_at: wake(cancelled ? 0 : now.update_sleep_seconds) }).eq("id", site.id);
+        .update({ update_next_run_at: wake(cancelled ? 0 : (waitSeconds ?? now.update_sleep_seconds)) }).eq("id", site.id);
     } else if (!cancelled) {
-      await admin.from("websites").update({ next_run_at: wake(now.sleep_seconds) }).eq("id", site.id);
+      await admin.from("websites").update({ next_run_at: wake(waitSeconds ?? now.sleep_seconds) }).eq("id", site.id);
     }
   }
 }
@@ -566,9 +584,19 @@ async function askOpenAI(cfg: Row, system: string, user: string): Promise<Row> {
     });
   let res: Response;
   try {
-    res = await call(true);
+    let jsonMode = true;
+    res = await call(jsonMode);
     // Some providers do not support JSON mode; ask again without it.
-    if (res.status === 400 || res.status === 422) res = await call(false);
+    if (res.status === 400 || res.status === 422) {
+      jsonMode = false;
+      res = await call(jsonMode);
+    }
+    // Rate limited (429): wait as long as the provider asks, then try again, up to 4 times.
+    for (let i = 0; i < 4 && res.status === 429; i++) {
+      const asked = Number(res.headers.get("retry-after")) || 2 + i * 3;
+      await new Promise((r) => setTimeout(r, (Math.min(asked, 20) + Math.random() * 2) * 1000));
+      res = await call(jsonMode);
+    }
   } catch (e) {
     if (e instanceof DOMException && e.name === "TimeoutError") {
       throw new Error(`The AI model took longer than ${limit} seconds to answer. Click Retry, or choose a faster model in Settings.`);

@@ -4,6 +4,7 @@ import { BrowserRouter, Link, NavLink, Navigate, Route, Routes } from "react-rou
 import type { Session } from "@supabase/supabase-js";
 import "./index.css";
 import { configured, SessionContext, supabase, useSession } from "./lib";
+import { ThemeToggle } from "./ui";
 import AuthPage from "./pages/AuthPage";
 import Dashboard from "./pages/Dashboard";
 import SitePage from "./pages/SitePage";
@@ -40,6 +41,7 @@ function Shell() {
           <NavLink to="/stats" className={link}>Statistics</NavLink>
           <NavLink to="/settings" className={link}>Settings</NavLink>
           <div className="ml-auto flex items-center gap-1">
+            <ThemeToggle />
             <NavLink to="/profile" className={link}>
               <span className="hidden sm:inline">{session.user.email}</span>
               <span className="sm:hidden">Profile</span>
