@@ -118,12 +118,13 @@ export default function SitePage() {
         </div>
       </div>
 
-      <div className="flex rounded-lg border border-slate-300 bg-white p-0.5 text-sm sm:w-fit">
+      {/* Both tabs always sit side by side on one line, however narrow the window. */}
+      <div className="flex w-full flex-nowrap rounded-lg border border-slate-300 bg-white p-0.5 text-sm sm:w-fit">
         {([["new", "Write new articles"], ["update", "Update old posts"]] as const).map(([m, label]) => (
           <button
             key={m}
             onClick={() => setMode(m)}
-            className={`flex-1 rounded-md px-4 py-1.5 font-medium ${mode === m ? "bg-indigo-600 text-white" : "text-slate-600"}`}
+            className={`flex-1 whitespace-nowrap rounded-md px-2 py-1.5 font-medium sm:px-4 ${mode === m ? "bg-indigo-600 text-white" : "text-slate-600"}`}
           >
             {label}
             {m === "update" && site.update_enabled && <span className="ml-1.5 inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-400" />}
@@ -182,7 +183,7 @@ export default function SitePage() {
                 <div className="min-w-0 flex-1 basis-64">
                   <div className="truncate text-sm font-medium">{a.title || a.keyword}</div>
                   <div className="truncate text-xs text-slate-500">
-                    {a.kind === "update" ? <>Was: {a.old_title ?? a.keyword} · </> : a.title && <>{a.keyword} · </>}
+                    {a.kind === "update" ? <>Was: {a.old_title ?? a.keyword} · Keyword: {a.keyword} · </> : a.title && <>{a.keyword} · </>}
                     {a.type === "review" ? (a.kind === "update" ? "Money content" : "Amazon review") : "Informative"}
                     {a.wp_category_name ? ` · ${a.wp_category_name}` : ""}
                     {a.word_count ? ` · ${a.word_count} words` : ""}
@@ -252,7 +253,7 @@ function UpdatePanel({ site, onDone, confirm }: { site: Site; onDone: () => void
       title: "Start updating old posts?",
       message:
         `This replaces the title and the whole content of published posts on ${site.name}, one at a time, starting with the oldest. ` +
-        "The post address (URL), publish date and status stay the same.\n\n" +
+        "The post address (URL) and status stay the same; the post date becomes the date and time of the update.\n\n" +
         "The old text is overwritten on the website. WordPress normally keeps earlier versions as revisions, but this app keeps no copy, so make a backup first if you may want the old text back.",
       label: "Start updating",
       busyLabel: "Starting…",
@@ -282,8 +283,9 @@ function UpdatePanel({ site, onDone, confirm }: { site: Site; onDone: () => void
           <div className="text-sm font-semibold">Update old posts</div>
           <p className="mt-0.5 max-w-2xl text-xs text-slate-500">
             Rewrites published posts one by one, oldest first. The title decides the type: questions (How, Why, What,
-            Can…) become a full informational article; titles like "10 Best…", "Top 5…" or "Best &lt;product&gt;"
-            become a money article with fresh Amazon products. The URL never changes.
+            Can…) become a full informational article; anything with "Best", "10 Best…", "Top 5…" or "Picks" — also
+            as a question, like "Which Is the Best…" — becomes a money article with fresh Amazon products. The main
+            keyword is taken from the post's URL. The URL never changes; the post date is set to the day of the update.
           </p>
         </div>
         <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${site.update_enabled ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>

@@ -148,8 +148,10 @@ async function writeArticle(id: string) {
   let cancelled = false;
   // "update" = rewrite an existing WordPress post in place; "new" = create a post.
   const isUpdate = a.kind === "update";
-  // For an old money post the Amazon search uses the product words of its old title.
-  const keyword: string = isUpdate && a.type === "review" ? productKeyword(a.keyword) : a.keyword;
+  // The main keyword (for an old post: the words of its URL) drives the title and the text.
+  const keyword: string = a.keyword;
+  // The Amazon search uses just the product words of it ("which is the best tent" -> "tent").
+  const searchKeyword: string = isUpdate ? productKeyword(a.keyword) : a.keyword;
 
   try {
     let title: string = a.title ?? "";
@@ -164,8 +166,8 @@ async function writeArticle(id: string) {
       if (a.type === "review") {
         await set({ step: "Finding Amazon products", progress: 15 });
         if (!site.tracking_id) throw new Error("This website has no Amazon tracking ID. Edit the website and add one.");
-        products = await searchAmazon(site, keyword);
-        if (products.length === 0) throw new Error(`Amazon returned no products for "${keyword}".`);
+        products = await searchAmazon(site, searchKeyword);
+        if (products.length === 0) throw new Error(`Amazon returned no products for "${searchKeyword}".`);
       }
 
       const report: Report = (step, progress) => set({ step, progress });
@@ -173,7 +175,7 @@ async function writeArticle(id: string) {
       const draft = a.type === "review"
         ? await writeReview(cfg, site, keyword, products, Number(a.product_count) || 5, a.include_faq !== false, report)
         : await writeInformative(cfg, site, keyword, a.include_faq !== false, report);
-      title = draft.title;
+      title = noYear(draft.title);
       // Updated posts use the H2 tag only once; every later heading moves one level down.
       html = isUpdate ? singleH2(draft.html) : draft.html;
       excerpt = draft.excerpt;
@@ -189,7 +191,7 @@ async function writeArticle(id: string) {
     }
     await set({ step: isUpdate ? "Replacing the old post" : "Publishing to WordPress", progress: 80 });
     const post = isUpdate
-      ? await wpUpdatePost(site, Number(a.wp_post_id), title, html, excerpt)
+      ? await wpUpdatePost(site, Number(a.wp_post_id), title, html, excerpt, String(a.wp_post_url ?? ""))
       : await wpCreatePost(site, title, html, excerpt, a.wp_category_id, a.keyword);
     await set({
       status: "completed", step: "Done", progress: 100, error: null,
@@ -223,16 +225,44 @@ const QUESTION = /^\s*(how|why|what|when|where|which|who|whose|can|could|do|does
 const NUMBERED = /\b(top\s*\d+|\d+\s+(best|top)|\d+\s+[\w' -]{0,40}?picks?)\b/i;
 const MONEY = /\b(best|top|picks?|reviews?|reviewed|buying guide|buyer'?s guide)\b/i;
 
-/** Money content ("10 Best ...", "Top 5 ...", "Best <product>") or informational (questions and the rest). */
-function detectIntent(title: string): "review" | "informative" {
-  if (NUMBERED.test(title)) return "review";
+/**
+ * Money content or informational, judged from the old title and the URL words.
+ * Anything with "best" or a numbered list ("10 Best", "Top 5", "7 Picks") is money
+ * content, even as a question ("Which Is the Best ..."). Other questions are informational.
+ */
+function detectIntent(title: string, keyword = ""): "review" | "informative" {
+  const text = `${title} ${keyword}`;
+  if (NUMBERED.test(text) || /\bbest\b/i.test(text)) return "review";
   if (QUESTION.test(title)) return "informative";
-  return MONEY.test(title) ? "review" : "informative";
+  return MONEY.test(text) ? "review" : "informative";
 }
 
-/** "10 Best Camping Lanterns in 2024: Reviews & Guide" -> "Camping Lanterns" (what to search on Amazon). */
+/** The main keyword of an old post: the words of its URL, without hyphens, years or a leading count. */
+function mainKeyword(slug: string, fallbackTitle: string): string {
+  let words = slug;
+  try {
+    words = decodeURIComponent(slug);
+  } catch { /* keep as is */ }
+  const clean = (s: string) =>
+    s.replace(/[-_]+/g, " ")
+      .replace(/\b(19|20)\d{2}\b/g, " ")       // years
+      .replace(/^(\s*top)?\s*\d+\s+/i, "$1 ")  // "10 best ..." / "top 10 ..."
+      .replace(/\s+\d{1,2}\s*$/, " ")          // WordPress duplicate suffix "-2"
+      .replace(/\s+/g, " ").trim();
+  return clean(words) || clean(fallbackTitle) || fallbackTitle;
+}
+
+/** Titles never carry a year: "Top 5 Tents in 2024: ..." -> "Top 5 Tents: ...". */
+function noYear(title: string): string {
+  return title
+    .replace(/\s*\b(in|of|for)\s+\(?(19|20)\d{2}\)?(?=\W|$)/gi, "")
+    .replace(/\s*[\[(]?\b(19|20)\d{2}\b[\])]?/g, "")
+    .replace(/\s+([:,!?])/g, "$1").replace(/\s{2,}/g, " ").replace(/^[\s:,-]+|[\s:,-]+$/g, "");
+}
+
+/** "which is the best camping lantern" -> "camping lantern" (what to search on Amazon). */
 function productKeyword(title: string): string {
-  const drop = /^(the|a|an|our|top|best|picks?|reviews?|reviewed|of|in|for|and|\d+|&)$/i;
+  const drop = /^(the|a|an|our|top|best|picks?|reviews?|reviewed|of|in|for|and|which|what|who|is|are|\d+|&)$/i;
   const words = title.split(/[:|()\[\]]| [-–—] /)[0].replace(/\b(19|20)\d{2}\b/g, " ").split(/\s+/).filter(Boolean);
   while (words.length && drop.test(words[0])) words.shift();
   while (words.length && drop.test(words[words.length - 1])) words.pop();
@@ -282,9 +312,11 @@ async function updateNext(siteId: string) {
         return;
       }
       const oldTitle = unesc(String(next.post.title?.rendered ?? "")).replace(/<[^>]+>/g, "").trim() || `Post ${next.post.id}`;
+      // The main keyword is the post's URL without the hyphens.
+      const keyword = mainKeyword(String(next.post.slug ?? ""), oldTitle);
       const { data: row, error } = await admin.from("articles").insert({
         user_id: site.user_id, website_id: siteId, kind: "update",
-        keyword: oldTitle, old_title: oldTitle, type: detectIntent(oldTitle),
+        keyword, old_title: oldTitle, type: detectIntent(oldTitle, keyword),
         status: "writing", started_at: new Date().toISOString(), attempts: 1, progress: 5, step: "Starting",
         wp_post_id: next.post.id, wp_post_url: next.post.link, wp_status: "publish",
         product_count: site.update_product_count, include_faq: site.update_include_faq,
@@ -313,7 +345,7 @@ async function wpNextOldPost(site: Row): Promise<{ post: Row; remaining: number 
     // "after" is exclusive, so step one second back and skip the posts already handled.
     const after = cursor ? new Date(new Date(cursor + "Z").getTime() - 1000).toISOString().slice(0, 19) : null;
     const res = await fetch(
-      `${api}/posts?status=publish&orderby=date&order=asc&per_page=20&_fields=id,date,link,title` +
+      `${api}/posts?status=publish&orderby=date&order=asc&per_page=20&_fields=id,date,link,slug,title` +
         (after ? `&after=${encodeURIComponent(after)}` : ""),
       { headers },
     );
@@ -334,13 +366,22 @@ async function wpNextOldPost(site: Row): Promise<{ post: Row; remaining: number 
   return null;
 }
 
-/** Replaces title, content and excerpt of an existing post. The URL (slug), status and date stay as they are. */
-async function wpUpdatePost(site: Row, postId: number, title: string, content: string, excerpt: string) {
+/**
+ * Replaces title, content and excerpt of an existing post and sets its date to now.
+ * The URL (slug) and status stay as they are. If the website puts the date in its
+ * post addresses (/2021/05/post-name/), the date is left alone, because changing
+ * it would change the URL.
+ */
+async function wpUpdatePost(site: Row, postId: number, title: string, content: string, excerpt: string, oldLink: string) {
   const { api, headers } = wp(site);
+  const dateInUrl = /\/(19|20)\d{2}\/\d{1,2}(\/|$)/.test(oldLink);
   const res = await fetch(`${api}/posts/${postId}`, {
     method: "POST",
     headers,
-    body: JSON.stringify({ title, content, excerpt }),
+    body: JSON.stringify({
+      title, content, excerpt,
+      ...(dateInUrl ? {} : { date_gmt: new Date().toISOString().slice(0, 19) }),
+    }),
   });
   if (!res.ok) throw new Error(await wpError(res));
   return await res.json() as { id: number; link: string; status: string };
@@ -518,7 +559,8 @@ const STYLE = [
   "You are a veteran product reviewer and editor. Write like a knowledgeable friend: specific, practical, honest.",
   "Rules: lead with what the reader needs; explain what a feature means in real use; vary sentence length; 2-4 sentences per paragraph; active voice; address the reader as 'you'; give honest trade-offs. No filler or cliches ('look no further', 'game-changer', 'when it comes to', 'dive in', 'elevate', 'in conclusion'), no hype, no exclamation marks, no emojis.",
   "SEO: use the exact keyword naturally in the first 100 words and once in a subheading; elsewhere use natural variations. Never stuff keywords.",
-  "HTML fragments may use only: p, h3, ul, ol, li, strong, em. No h1 or h2, links, images or markdown.",
+  "HTML fragments may use only: p, h3, ul, ol, li. No h1 or h2, links, images or markdown. Never bold or italicise anything: no strong, b, em or i tags, and never highlight the keyword.",
+  "Titles never contain a year.",
   "Reply with one JSON object only, in the requested shape.",
 ].join("\n");
 
@@ -549,6 +591,8 @@ async function inParallel<T>(jobs: (() => Promise<T>)[], report: Report): Promis
 }
 
 const para = (text: unknown) => (text ? `<p>${esc(String(text))}</p>\n` : "");
+/** AI-written HTML with any bold or italic markup removed, so keywords are never highlighted. */
+const plain = (html: unknown) => String(html ?? "").replace(/<\/?(strong|b|em|i)(\s[^>]*)?>/gi, "");
 
 function faqHtml(heading: unknown, faq: unknown) {
   if (!Array.isArray(faq) || faq.length === 0) return "";
@@ -586,10 +630,10 @@ async function writeInformative(cfg: Row, site: Row, keyword: string, withFaq: b
         `JSON shape: {"html": string (130-200 words; use h3 or a list where it helps)}`)),
   ], report);
 
-  let html = `${plan.intro_html ?? ""}\n`;
-  outline.forEach((s, i) => { html += `<h2>${esc(String(s.heading ?? ""))}</h2>\n${sections[i]?.html ?? ""}\n`; });
+  let html = `${plain(plan.intro_html)}\n`;
+  outline.forEach((s, i) => { html += `<h2>${esc(String(s.heading ?? ""))}</h2>\n${plain(sections[i]?.html)}\n`; });
   if (withFaq) html += faqHtml(plan.faq_heading, closing.faq);
-  html += `<h2>${esc(String(plan.conclusion_heading || "Final Thoughts"))}</h2>\n${closing.conclusion_html ?? ""}`;
+  html += `<h2>${esc(String(plan.conclusion_heading || "Final Thoughts"))}</h2>\n${plain(closing.conclusion_html)}`;
   return { title: String(plan.title), html, excerpt: String(plan.meta_description ?? "") };
 }
 
@@ -673,7 +717,7 @@ async function writeReview(
     p.rating ? `${p.rating.toFixed(1)}/5${p.reviews ? ` (${p.reviews.toLocaleString("en-US")})` : ""}` : "";
   const anyRating = picks.some(({ p }) => p.rating);
 
-  let html = `<p><em>As an Amazon Associate I earn from qualifying purchases.</em></p>\n${plan.intro_html ?? ""}\n`;
+  let html = `<p><em>As an Amazon Associate I earn from qualifying purchases.</em></p>\n${plain(plan.intro_html)}\n`;
 
   html += `<h2>${esc(String(plan.glance_heading || `Our Top ${picks.length} Picks at a Glance`))}</h2>\n` +
     `<table><tr><th></th><th>${esc(L.product)}</th>${anyRating ? `<th>${esc(L.rating)}</th>` : ""}<th></th></tr>` +
@@ -699,9 +743,9 @@ async function writeReview(
     html += para(r.closing);
   });
 
-  html += `<h2>${esc(String(plan.buying_guide_heading || "Buying Guide"))}</h2>\n${closing.buying_guide_html ?? ""}\n`;
+  html += `<h2>${esc(String(plan.buying_guide_heading || "Buying Guide"))}</h2>\n${plain(closing.buying_guide_html)}\n`;
   if (withFaq) html += faqHtml(plan.faq_heading, closing.faq);
-  html += `<h2>${esc(String(plan.conclusion_heading || "Final Verdict"))}</h2>\n${closing.conclusion_html ?? ""}`;
+  html += `<h2>${esc(String(plan.conclusion_heading || "Final Verdict"))}</h2>\n${plain(closing.conclusion_html)}`;
   return { title: String(plan.title), html, excerpt: String(plan.meta_description ?? "") };
 }
 
