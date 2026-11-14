@@ -265,9 +265,14 @@ function noYear(title: string): string {
  * hyphen ("top-rated" -> "Top-Rated"). Words with their own capitals (USB, iPhone) are kept.
  */
 function capitalize(title: string): string {
-  return title.replace(/[^\s-]+/g, (word) =>
-    /[A-Z]/.test(word.slice(1)) ? word : word.replace(/\p{L}/u, (c) => c.toUpperCase()));
+  return title
+    .replace(/[^\s-]+/g, (word) =>
+      /[A-Z]/.test(word.slice(1)) ? word : word.replace(/\p{L}/u, (c) => c.toUpperCase()))
+    // Common abbreviations are written in capitals even when the keyword was typed in lowercase.
+    .replace(ABBREVIATIONS, (word) => word.toUpperCase());
 }
+const ABBREVIATIONS =
+  /\b(uv|rv|led|usb|tv|cpap|diy|gps|hd|uhd|4k|suv|atv|utv|ssd|hdmi|bbq|spf|bpa|cbd|ac|dc|pc|nfc|rgb|oled|qled|lcd|dslr|abs|pvc|hvac|ev|rc|xl|xxl|usa|uk)\b/gi;
 
 /** "which is the best camping lantern" -> "camping lantern" (what to search on Amazon). */
 function productKeyword(title: string): string {
@@ -617,7 +622,7 @@ async function writeInformative(cfg: Row, site: Row, keyword: string, withFaq: b
     STYLE,
     `Plan an informative article in ${site.language} for the keyword "${keyword}". ` +
       `Cover what a searcher of this keyword wants to know, in the order they need it.\n` +
-      `JSON shape: {"title": string (creative and specific, 50-62 characters, keyword near the start, every word capitalised), ` +
+      `JSON shape: {"title": string (creative and specific, 50-62 characters, keyword near the start, every word capitalised, abbreviations in capitals such as UV, RV, LED), ` +
       `"meta_description": string (140-155 characters, includes the keyword), ` +
       `"intro_html": string (3-5 short paragraphs; answer the main question straight away), ` +
       `"outline": [{"heading": string, "brief": string (max 20 words: what the section covers)}] (5-6 sections, no FAQ or conclusion), ` +
@@ -693,7 +698,10 @@ async function writeReview(
       `Products: ${JSON.stringify(products.map((p) => facts(p, 4, 110)))}\n` +
       `JSON shape: {"title": string (creative, click-worthy and SEO-friendly, 50-65 characters, every word capitalised; ` +
       `it MUST contain the number ${count} and the keyword, and it MUST follow this pattern: ${titlePattern(count)} ` +
-      `Fill the "..." with a specific benefit, use or audience that fits these products; do not repeat a word such as "Best" twice; ` +
+      `Fill the "..." with a specific benefit, use or audience that fits these products; do not repeat a word such as "Best" twice. ` +
+      `The title must read as correct, natural English: after a number greater than 1 make the keyword's product noun plural ` +
+      `("5 Best Tankless Water Heaters for RV", not "5 Best Tankless Water Heater for RV") and drop words like "reviews" from the keyword; ` +
+      `write abbreviations in capitals (UV, RV, LED, USB, TV); ` +
       `no generic "Reviews & Buyer's Guide" ending), ` +
       `"meta_description": string (140-155 characters, includes the keyword and the number ${count}), ` +
       `"intro_html": string (3-5 short paragraphs: the buyer's problem, what matters when choosing, how these picks were selected, what the guide covers), ` +
