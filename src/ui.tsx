@@ -78,7 +78,9 @@ export type ConfirmRequest = {
   title: string;
   message: string;
   label: string;
-  /** Does the deletion. Return an error message to show, or null on success. */
+  /** Text on the button while it works. Defaults to "Deleting…". */
+  busyLabel?: string;
+  /** Does the action. Return an error message to show, or null on success. */
   run: () => Promise<string | null>;
 };
 
@@ -103,7 +105,7 @@ export function ConfirmDialog({ request, onClose }: { request: ConfirmRequest; o
         <div className="mt-5 flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
           <Button onClick={go} disabled={busy} className="!bg-red-600 hover:!bg-red-700">
-            {busy ? "Deleting…" : request.label}
+            {busy ? (request.busyLabel ?? "Deleting…") : request.label}
           </Button>
         </div>
       </div>

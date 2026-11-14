@@ -38,6 +38,14 @@ Deno.serve(async (req) => {
     EdgeRuntime.waitUntil(writeArticle(String(body.article_id)));
     return json({ ok: true }, 202);
   }
+  // From the scheduler: rewrite the next oldest post of a website.
+  if (body.action === "update_next") {
+    if (!WORKER_SECRET || req.headers.get("x-worker-secret") !== WORKER_SECRET) {
+      return json({ ok: false, error: "Unauthorized" }, 401);
+    }
+    EdgeRuntime.waitUntil(updateNext(String(body.website_id)));
+    return json({ ok: true }, 202);
+  }
 
   const token = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "");
   const { data: auth } = await admin.auth.getUser(token);
@@ -138,6 +146,10 @@ async function writeArticle(id: string) {
     return data?.status === "writing" && data.attempts === a.attempts;
   };
   let cancelled = false;
+  // "update" = rewrite an existing WordPress post in place; "new" = create a post.
+  const isUpdate = a.kind === "update";
+  // For an old money post the Amazon search uses the product words of its old title.
+  const keyword: string = isUpdate && a.type === "review" ? productKeyword(a.keyword) : a.keyword;
 
   try {
     let title: string = a.title ?? "";
@@ -152,17 +164,18 @@ async function writeArticle(id: string) {
       if (a.type === "review") {
         await set({ step: "Finding Amazon products", progress: 15 });
         if (!site.tracking_id) throw new Error("This website has no Amazon tracking ID. Edit the website and add one.");
-        products = await searchAmazon(site, a.keyword);
-        if (products.length === 0) throw new Error(`Amazon returned no products for "${a.keyword}".`);
+        products = await searchAmazon(site, keyword);
+        if (products.length === 0) throw new Error(`Amazon returned no products for "${keyword}".`);
       }
 
       const report: Report = (step, progress) => set({ step, progress });
       cfg._usage = { in: 0, out: 0 };
       const draft = a.type === "review"
-        ? await writeReview(cfg, site, a.keyword, products, Number(a.product_count) || 5, a.include_faq !== false, report)
-        : await writeInformative(cfg, site, a.keyword, a.include_faq !== false, report);
+        ? await writeReview(cfg, site, keyword, products, Number(a.product_count) || 5, a.include_faq !== false, report)
+        : await writeInformative(cfg, site, keyword, a.include_faq !== false, report);
       title = draft.title;
-      html = draft.html;
+      // Updated posts use the H2 tag only once; every later heading moves one level down.
+      html = isUpdate ? singleH2(draft.html) : draft.html;
       excerpt = draft.excerpt;
       await set({ title, content_html: html, word_count: countWords(html) });
       // Separate update: if the token columns are missing, the article itself is still saved.
@@ -174,8 +187,10 @@ async function writeArticle(id: string) {
       cancelled = true;
       return;
     }
-    await set({ step: "Publishing to WordPress", progress: 80 });
-    const post = await wpCreatePost(site, title, html, excerpt, a.wp_category_id, a.keyword);
+    await set({ step: isUpdate ? "Replacing the old post" : "Publishing to WordPress", progress: 80 });
+    const post = isUpdate
+      ? await wpUpdatePost(site, Number(a.wp_post_id), title, html, excerpt)
+      : await wpCreatePost(site, title, html, excerpt, a.wp_category_id, a.keyword);
     await set({
       status: "completed", step: "Done", progress: 100, error: null,
       wp_post_id: post.id, wp_post_url: post.link, wp_status: post.status,
@@ -191,10 +206,144 @@ async function writeArticle(id: string) {
   } finally {
     // Sleep time: this website's next keyword may not start before this moment.
     // (Not after a cancel, so a retry can start straight away.)
-    if (!cancelled) await admin.from("websites")
-      .update({ next_run_at: new Date(Date.now() + site.sleep_seconds * 1000).toISOString() })
-      .eq("id", site.id);
+    const wake = (seconds: number) => new Date(Date.now() + seconds * 1000).toISOString();
+    if (isUpdate) {
+      // The update lane has its own sleep time. After a cancel it may continue straight away.
+      await admin.from("websites")
+        .update({ update_next_run_at: wake(cancelled ? 0 : site.update_sleep_seconds) }).eq("id", site.id);
+    } else if (!cancelled) {
+      await admin.from("websites").update({ next_run_at: wake(site.sleep_seconds) }).eq("id", site.id);
+    }
   }
+}
+
+// ------------------------------------------------------------------ updating old posts
+
+const QUESTION = /^\s*(how|why|what|when|where|which|who|whose|can|could|do|does|did|is|are|was|were|should|will|would)\b/i;
+const NUMBERED = /\b(top\s*\d+|\d+\s+(best|top)|\d+\s+[\w' -]{0,40}?picks?)\b/i;
+const MONEY = /\b(best|top|picks?|reviews?|reviewed|buying guide|buyer'?s guide)\b/i;
+
+/** Money content ("10 Best ...", "Top 5 ...", "Best <product>") or informational (questions and the rest). */
+function detectIntent(title: string): "review" | "informative" {
+  if (NUMBERED.test(title)) return "review";
+  if (QUESTION.test(title)) return "informative";
+  return MONEY.test(title) ? "review" : "informative";
+}
+
+/** "10 Best Camping Lanterns in 2024: Reviews & Guide" -> "Camping Lanterns" (what to search on Amazon). */
+function productKeyword(title: string): string {
+  const drop = /^(the|a|an|our|top|best|picks?|reviews?|reviewed|of|in|for|and|\d+|&)$/i;
+  const words = title.split(/[:|()\[\]]| [-–—] /)[0].replace(/\b(19|20)\d{2}\b/g, " ").split(/\s+/).filter(Boolean);
+  while (words.length && drop.test(words[0])) words.shift();
+  while (words.length && drop.test(words[words.length - 1])) words.pop();
+  return words.join(" ") || title;
+}
+
+/** Keeps the first H2; later H2s become H3, and the headings below them move down one level too. */
+function singleH2(html: string): string {
+  const first = html.search(/<h2[\s>]/i);
+  if (first < 0) return html;
+  const end = html.indexOf("</h2>", first);
+  if (end < 0) return html;
+  const rest = html.slice(end + 5)
+    .replace(/<(\/?)h4(?=[\s>])/gi, "<$1h5")
+    .replace(/<(\/?)h3(?=[\s>])/gi, "<$1h4")
+    .replace(/<(\/?)h2(?=[\s>])/gi, "<$1h3");
+  return html.slice(0, end + 5) + rest;
+}
+
+// Takes the oldest post that has not been handled yet, decides its intent from
+// the title, and rewrites it. One post per call; the scheduler calls again after
+// the website's update sleep time.
+async function updateNext(siteId: string) {
+  const { data: site } = await admin.from("websites").select("*").eq("id", siteId).maybeSingle();
+  if (!site || !site.update_enabled) return;
+  const patchSite = (patch: Row) => admin.from("websites").update(patch).eq("id", siteId);
+  const later = (seconds: number) => new Date(Date.now() + seconds * 1000).toISOString();
+
+  let articleId: string | null = null;
+  try {
+    // A failed update that you clicked Retry on goes first.
+    const { data: again } = await admin.from("articles").select("id,attempts")
+      .eq("website_id", siteId).eq("kind", "update").eq("status", "queued").order("seq").limit(1).maybeSingle();
+    if (again) {
+      const { data: claimed } = await admin.from("articles")
+        .update({
+          status: "writing", started_at: new Date().toISOString(), finished_at: null, progress: 5,
+          step: "Starting", attempts: again.attempts + 1, error: null,
+        })
+        .eq("id", again.id).eq("status", "queued").select("id").maybeSingle();
+      articleId = claimed?.id ?? null;
+    } else {
+      const next = await wpNextOldPost(site);
+      if (!next) {
+        // Every post has been handled: switch the updater off.
+        await patchSite({ update_enabled: false, update_remaining: 0, update_error: null });
+        return;
+      }
+      const oldTitle = unesc(String(next.post.title?.rendered ?? "")).replace(/<[^>]+>/g, "").trim() || `Post ${next.post.id}`;
+      const { data: row, error } = await admin.from("articles").insert({
+        user_id: site.user_id, website_id: siteId, kind: "update",
+        keyword: oldTitle, old_title: oldTitle, type: detectIntent(oldTitle),
+        status: "writing", started_at: new Date().toISOString(), attempts: 1, progress: 5, step: "Starting",
+        wp_post_id: next.post.id, wp_post_url: next.post.link, wp_status: "publish",
+        product_count: site.update_product_count, include_faq: site.update_include_faq,
+      }).select("id").single();
+      if (error) throw new Error(error.message);
+      articleId = row.id;
+      await patchSite({ update_cursor: next.post.date, update_remaining: Math.max(0, next.remaining - 1), update_error: null });
+    }
+  } catch (e) {
+    // Could not even pick a post (for example the WordPress login failed): show why and try again later.
+    await patchSite({
+      update_error: String(e instanceof Error ? e.message : e).slice(0, 400),
+      update_next_run_at: later(Math.max(60, site.update_sleep_seconds)),
+    });
+    return;
+  }
+  if (articleId) await writeArticle(articleId);
+  else await patchSite({ update_next_run_at: later(0) });
+}
+
+/** The oldest published post not handled by this app yet, plus how many are left from there. */
+async function wpNextOldPost(site: Row): Promise<{ post: Row; remaining: number } | null> {
+  const { api, headers } = wp(site);
+  let cursor: string | null = site.update_cursor ?? null;
+  for (let round = 0; round < 10; round++) {
+    // "after" is exclusive, so step one second back and skip the posts already handled.
+    const after = cursor ? new Date(new Date(cursor + "Z").getTime() - 1000).toISOString().slice(0, 19) : null;
+    const res = await fetch(
+      `${api}/posts?status=publish&orderby=date&order=asc&per_page=20&_fields=id,date,link,title` +
+        (after ? `&after=${encodeURIComponent(after)}` : ""),
+      { headers },
+    );
+    if (!res.ok) throw new Error(await wpError(res));
+    const posts: Row[] = await res.json();
+    if (posts.length === 0) return null;
+    const remaining = Number(res.headers.get("X-WP-Total") ?? posts.length);
+    // Posts this app wrote or already updated are skipped.
+    const { data: seen } = await admin.from("articles").select("wp_post_id")
+      .eq("website_id", site.id).in("wp_post_id", posts.map((p) => p.id));
+    const done = new Set((seen ?? []).map((r) => Number(r.wp_post_id)));
+    const post = posts.find((p) => !done.has(Number(p.id)));
+    if (post) return { post, remaining: remaining - posts.indexOf(post) };
+    if (posts.length < 20) return null;
+    cursor = String(posts[posts.length - 1].date);
+    if (cursor === site.update_cursor) cursor = new Date(new Date(cursor + "Z").getTime() + 1000).toISOString().slice(0, 19);
+  }
+  return null;
+}
+
+/** Replaces title, content and excerpt of an existing post. The URL (slug), status and date stay as they are. */
+async function wpUpdatePost(site: Row, postId: number, title: string, content: string, excerpt: string) {
+  const { api, headers } = wp(site);
+  const res = await fetch(`${api}/posts/${postId}`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ title, content, excerpt }),
+  });
+  if (!res.ok) throw new Error(await wpError(res));
+  return await res.json() as { id: number; link: string; status: string };
 }
 
 // ------------------------------------------------------------------ Amazon Creators API

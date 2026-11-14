@@ -31,6 +31,9 @@ function duration(seconds: number | null) {
 export default function Stats() {
   const [rangeKey, setRangeKey] = useState<(typeof RANGES)[number]["key"]>("24h");
   const range = RANGES.find((r) => r.key === rangeKey)!;
+  // Separate statistics for brand-new articles and for rewritten old posts.
+  const [kind, setKind] = useState<"new" | "update">("new");
+  const noun = kind === "new" ? "article" : "update";
   const [rows, setRows] = useState<Row[] | null>(null);
   const [buckets, setBuckets] = useState<Bucket[]>([]);
   const [error, setError] = useState("");
@@ -40,12 +43,12 @@ export default function Stats() {
     async function load() {
       const since = new Date(Date.now() - range.hours * 3600_000);
       const [stats, timeline] = await Promise.all([
-        supabase.rpc("article_stats", { since: since.toISOString() }),
-        supabase.rpc("article_timeline", { since: since.toISOString(), bucket: range.bucket }),
+        supabase.rpc("article_stats", { since: since.toISOString(), kind }),
+        supabase.rpc("article_timeline", { since: since.toISOString(), bucket: range.bucket, kind }),
       ]);
       if (!alive) return;
       if (stats.error || timeline.error) {
-        return setError("Database update needed: run supabase/migrations/006_statistics.sql in the Supabase SQL Editor, then reload.");
+        return setError("Database update needed: run supabase/migrations/007_update_old_posts.sql in the Supabase SQL Editor, then reload.");
       }
       setError("");
       setRows((stats.data as Row[]).map((r) => ({ ...r, seconds_total: Number(r.seconds_total) })));
@@ -57,22 +60,30 @@ export default function Stats() {
       alive = false;
       window.clearInterval(timer);
     };
-  }, [rangeKey]);
+  }, [rangeKey, kind]);
 
   const days = range.hours / 24;
   const sum = (k: keyof Row) => (rows ?? []).reduce((n, r) => n + Number(r[k]), 0);
   const completed = sum("completed");
   const sites = rows?.length ?? 0;
+  const perDay = (n: number) => (n >= 10 || Number.isInteger(n) ? num(n) : n.toFixed(1));
   const tiles = [
-    { label: "Avg words per article", value: avg(sum("words_total"), completed), format: num, note: `${num(sum("words_total"))} words written` },
-    { label: "Avg tokens per article", value: avg(sum("tokens_total"), sum("tokens_articles")), format: num, note: `${num(sum("tokens_total"))} tokens used` },
-    { label: "Avg time per article", value: avg(sum("seconds_total"), completed), format: duration, note: "from start to WordPress draft" },
-    {
-      label: "Articles per website per 24 h",
-      value: sites > 0 ? completed / sites / days : null,
-      format: (n: number) => (n >= 10 ? num(n) : n.toFixed(1)),
-      note: `${num(completed)} articles on ${sites} website${sites === 1 ? "" : "s"}`,
-    },
+    kind === "new"
+      ? {
+          label: "Articles per website per 24 h",
+          value: sites > 0 ? completed / sites / days : null,
+          format: perDay,
+          note: `${num(completed)} articles on ${sites} website${sites === 1 ? "" : "s"}`,
+        }
+      : {
+          label: days === 1 ? "Posts updated in 24 h" : "Posts updated per 24 h",
+          value: rows ? completed / days : null,
+          format: perDay,
+          note: `${num(completed)} updated, ${num(sum("failed"))} failed`,
+        },
+    { label: `Avg time per ${noun}`, value: avg(sum("seconds_total"), completed), format: duration, note: kind === "new" ? "from start to WordPress draft" : "from picking the post to replacing it" },
+    { label: `Avg words per ${noun}`, value: avg(sum("words_total"), completed), format: num, note: `${num(sum("words_total"))} words written` },
+    { label: `Avg tokens per ${noun}`, value: avg(sum("tokens_total"), sum("tokens_articles")), format: num, note: `${num(sum("tokens_total"))} tokens used` },
   ];
   const perSite = (rows ?? []).map((r) => ({
     name: r.website,
@@ -89,7 +100,20 @@ export default function Stats() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold">Statistics</h1>
-          <p className="text-sm text-slate-500">Completed articles, {range.label.toLowerCase()}. Updates every 30 seconds.</p>
+          <p className="text-sm text-slate-500">
+            {kind === "new" ? "New articles written" : "Old posts updated"}, {range.label.toLowerCase()}. Refreshes every 30 seconds.
+          </p>
+        </div>
+        <div className="flex rounded-lg border border-slate-300 bg-white p-0.5 text-sm">
+          {([["new", "New articles"], ["update", "Updated posts"]] as const).map(([k, label]) => (
+            <button
+              key={k}
+              onClick={() => setKind(k)}
+              className={`rounded-md px-3 py-1 font-medium ${kind === k ? "bg-indigo-600 text-white" : "text-slate-600"}`}
+            >
+              {label}
+            </button>
+          ))}
         </div>
         <div className="flex rounded-lg border border-slate-300 bg-white p-0.5 text-sm">
           {RANGES.map((r) => (
@@ -119,16 +143,16 @@ export default function Stats() {
       </div>
 
       <Card className="p-5">
-        <div className="text-sm font-semibold">Articles completed per {range.bucket}</div>
-        <Timeline buckets={buckets} />
+        <div className="text-sm font-semibold">{kind === "new" ? "Articles completed" : "Posts updated"} per {range.bucket}</div>
+        <Timeline buckets={buckets} noun={noun} />
       </Card>
 
       <div className="grid gap-4 md:grid-cols-2">
-        <BarList title="Articles per 24 hours" rows={perSite.map((s) => ({ name: s.name, value: s.perDay }))}
-          format={(n) => (n >= 10 || Number.isInteger(n) ? num(n) : n.toFixed(1))} />
-        <BarList title="Avg words per article" rows={perSite.map((s) => ({ name: s.name, value: s.words }))} format={num} />
-        <BarList title="Avg tokens per article" rows={perSite.map((s) => ({ name: s.name, value: s.tokens }))} format={num} />
-        <BarList title="Avg time per article" rows={perSite.map((s) => ({ name: s.name, value: s.seconds }))} format={duration} />
+        <BarList title={kind === "new" ? "Articles per 24 hours" : "Posts updated per 24 hours"}
+          rows={perSite.map((s) => ({ name: s.name, value: s.perDay }))} format={perDay} />
+        <BarList title={`Avg time per ${noun}`} rows={perSite.map((s) => ({ name: s.name, value: s.seconds }))} format={duration} />
+        <BarList title={`Avg words per ${noun}`} rows={perSite.map((s) => ({ name: s.name, value: s.words }))} format={num} />
+        <BarList title={`Avg tokens per ${noun}`} rows={perSite.map((s) => ({ name: s.name, value: s.tokens }))} format={num} />
       </div>
 
       <Card className="overflow-x-auto">
@@ -190,11 +214,11 @@ function fillBuckets(data: { bucket_start: string; completed: number }[], bucket
 }
 
 /** Column chart, one colour (one series). Hover a column for its exact value. */
-function Timeline({ buckets }: { buckets: Bucket[] }) {
+function Timeline({ buckets, noun }: { buckets: Bucket[]; noun: string }) {
   const [hover, setHover] = useState<number | null>(null);
   const max = Math.max(1, ...buckets.map((b) => b.completed));
   const total = buckets.reduce((n, b) => n + b.completed, 0);
-  if (total === 0) return <div className="py-10 text-center text-sm text-slate-500">No articles completed in this period yet.</div>;
+  if (total === 0) return <div className="py-10 text-center text-sm text-slate-500">No {noun}s completed in this period yet.</div>;
   const ticks = [0, Math.floor((buckets.length - 1) / 2), buckets.length - 1];
   return (
     <div className="mt-4">
@@ -210,7 +234,7 @@ function Timeline({ buckets }: { buckets: Bucket[] }) {
             />
             {hover === i && (
               <div className={`pointer-events-none absolute bottom-full z-10 mb-1 whitespace-nowrap rounded-md bg-slate-900 px-2 py-1 text-xs text-white shadow ${i > buckets.length / 2 ? "right-0" : "left-0"}`}>
-                <span className="font-semibold tabular-nums">{b.completed}</span> article{b.completed === 1 ? "" : "s"} · {b.label}
+                <span className="font-semibold tabular-nums">{b.completed}</span> {noun}{b.completed === 1 ? "" : "s"} · {b.label}
               </div>
             )}
           </div>

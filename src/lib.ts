@@ -37,6 +37,20 @@ export type Site = {
   amazon_version: string;
   has_amazon_keys: boolean;
   amazon_account_id: string | null;
+  // Old-post updater
+  update_enabled: boolean;
+  update_sleep_seconds: number;
+  update_product_count: number;
+  update_include_faq: boolean;
+  update_next_run_at: string;
+  update_cursor: string | null;
+  update_remaining: number | null;
+  update_error: string | null;
+  updates_done: number;
+  updates_failed: number;
+  update_keyword: string | null;
+  update_step: string | null;
+  update_progress: number | null;
 };
 
 /** A saved Amazon Creators API account (the ID and Secret are never readable here). */
@@ -103,6 +117,8 @@ export type Article = {
   wp_post_url: string | null;
   wp_status: string | null;
   wp_category_name: string | null;
+  kind: "new" | "update";
+  old_title: string | null;
   error: string | null;
   created_at: string;
   finished_at: string | null;

@@ -161,6 +161,13 @@ export default function Dashboard() {
                   No Amazon Creators API credentials yet — click Edit to add them (needed for review articles).
                 </div>
               )}
+              {(s.update_enabled || s.updates_done > 0) && (
+                <div className="flex items-center gap-2 text-xs text-slate-600">
+                  <span className={`inline-block h-2 w-2 rounded-full ${s.update_enabled ? "animate-pulse bg-emerald-500" : "bg-slate-300"}`} />
+                  Old-post updater {s.update_enabled ? "running" : "stopped"} · {s.updates_done} updated
+                  {s.update_keyword ? ` · now: ${s.update_keyword}` : ""}
+                </div>
+              )}
               <div className="text-xs text-slate-500">
                 {s.completed} written by AffiliWriter · posts as {s.post_status === "publish" ? "published" : "draft"} · sleep{" "}
                 {sleepLabel(s.sleep_seconds)} · {s.marketplace.replace("www.", "")}
