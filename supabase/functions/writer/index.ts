@@ -124,6 +124,44 @@ Deno.serve(async (req) => {
     const problem = await applySleep(site.id, kind, sleepSeconds(body.seconds));
     return json(problem ? { ok: false, error: problem } : { ok: true });
   }
+  // Settings > Free up database storage. Works through the finished articles of all
+  // websites in small batches; the app calls again while "more" is true.
+  //   mode "text": erase only the saved article text (the history list and statistics stay).
+  //   mode "all":  remove finished new articles from the history as well.
+  // Queued and in-progress keywords are never touched, and nothing changes on the websites.
+  if (body.action === "clear_history") {
+    const all = body.mode === "all";
+    const started = Date.now();
+    let removed = 0;
+    let more = true;
+    while (more && Date.now() - started < 20000) {
+      let ids: string[] = [];
+      if (all) {
+        const { data } = await admin.from("articles").select("id")
+          .eq("user_id", auth.user.id).eq("kind", "new").in("status", ["completed", "failed"]).limit(500);
+        ids = (data ?? []).map((r) => r.id);
+        if (ids.length) {
+          const { error } = await admin.from("articles").delete().in("id", ids);
+          if (error) return json({ ok: false, error: error.message });
+        }
+      }
+      // Updated posts keep their small record (so the updater never redoes them); only the text goes.
+      if (ids.length === 0) {
+        let q = admin.from("articles").select("id")
+          .eq("user_id", auth.user.id).eq("status", "completed").not("content_html", "is", null).limit(500);
+        if (all) q = q.eq("kind", "update");
+        const { data } = await q;
+        ids = (data ?? []).map((r) => r.id);
+        if (ids.length) {
+          const { error } = await admin.from("articles").update({ content_html: null }).in("id", ids);
+          if (error) return json({ ok: false, error: error.message });
+        }
+      }
+      removed += ids.length;
+      more = ids.length > 0;
+    }
+    return json({ ok: true, removed, more });
+  }
   // The same for every website of this user in one go (Settings > Sleep time for all websites).
   if (body.action === "set_sleep_all") {
     const kind = body.lane === "update" ? "update" : "new";

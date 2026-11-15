@@ -202,6 +202,24 @@ export async function saveSleep(websiteId: string, lane: "new" | "update", secon
   return data?.ok ? null : (data?.error ?? "Could not save the sleep time.");
 }
 
+/**
+ * Frees database storage for all websites. "text" erases only the saved article
+ * text; "all" also removes finished articles from the history. Runs in batches and
+ * reports the running total through `onProgress`. Returns an error message or null.
+ */
+export async function clearHistoryForAll(mode: "text" | "all", onProgress: (total: number) => void): Promise<string | null> {
+  let total = 0;
+  for (let round = 0; round < 500; round++) {
+    const { data, error } = await supabase.functions.invoke("writer", { body: { action: "clear_history", mode } });
+    if (error) return writerError(error);
+    if (!data?.ok) return data?.error ?? "Could not clear the history.";
+    total += data.removed;
+    onProgress(total);
+    if (!data.more) return null;
+  }
+  return "Stopped after many rounds; click the button again to continue.";
+}
+
 /** Sets the sleep time of every website at once; effective immediately. */
 export async function saveSleepForAll(lane: "new" | "update", seconds: number): Promise<{ ok: boolean; text: string }> {
   const { data, error } = await supabase.functions.invoke("writer", {

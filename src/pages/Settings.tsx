@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import {
-  addAmazonAccount, AMAZON_VERSIONS, loadAmazonAccounts, saveSleepForAll, supabase, testConnection, useSession, type AmazonAccount,
+  addAmazonAccount, AMAZON_VERSIONS, clearHistoryForAll, loadAmazonAccounts, saveSleepForAll, supabase, testConnection, useSession, type AmazonAccount,
 } from "../lib";
 import { Button, Card, ConfirmDialog, Field, Input, Notice, Select, type ConfirmRequest } from "../ui";
 
@@ -106,7 +106,71 @@ export default function Settings() {
     </form>
     <SleepForAll />
     <AmazonAccounts />
+    <FreeStorage />
     </div>
+  );
+}
+
+/** Clears generated content of all websites from the app's database to free storage. */
+function FreeStorage() {
+  const [ask, setAsk] = useState<ConfirmRequest | null>(null);
+  const [progress, setProgress] = useState<number | null>(null);
+  const [msg, setMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+
+  function run(mode: "text" | "all") {
+    const all = mode === "all";
+    setAsk({
+      title: all ? "Clear all history?" : "Delete the saved article text?",
+      message: all
+        ? "For ALL websites, every completed and failed article is removed from this app, together with its saved text. It cannot be undone.\n\n" +
+          "Not touched: keywords still waiting or being written, and every post on your WordPress sites.\n\n" +
+          "The Statistics page will start again from zero. Updated old posts keep a small record (without text), so the updater never rewrites the same post twice."
+        : "For ALL websites, the saved text of every completed article is erased from this app. It cannot be undone.\n\n" +
+          "The article lists and the Statistics page stay as they are, but Preview no longer shows the text. Every post on your WordPress sites is untouched.",
+      label: all ? "Clear all history" : "Delete saved text",
+      busyLabel: "Clearing…",
+      run: async () => {
+        setMsg(null);
+        setProgress(0);
+        const problem = await clearHistoryForAll(mode, setProgress);
+        setProgress((done) => {
+          if (!problem) {
+            setMsg({ kind: "ok", text: `Done. ${(done ?? 0).toLocaleString("en-US")} articles were cleared.` });
+          }
+          return null;
+        });
+        return problem;
+      },
+    });
+  }
+
+  return (
+    <Card className="space-y-4 p-5">
+      <div>
+        <h2 className="font-semibold">Free up database storage</h2>
+        <p className="mt-0.5 text-sm text-slate-500">
+          The app keeps a copy of every article it writes, which is what fills your Supabase database. Both buttons
+          work on all websites at once and never change anything on the websites themselves.
+        </p>
+      </div>
+      {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
+      {progress !== null && <Notice kind="info">Clearing… {progress.toLocaleString("en-US")} articles so far. Keep this page open.</Notice>}
+      <div className="flex flex-wrap gap-6">
+        <div className="max-w-xs space-y-2">
+          <Button type="button" variant="danger" onClick={() => run("all")} disabled={progress !== null}>Clear all history</Button>
+          <p className="text-xs text-slate-500">
+            Removes all completed and failed articles from the lists and deletes their text. Frees the most space.
+          </p>
+        </div>
+        <div className="max-w-xs space-y-2">
+          <Button type="button" variant="ghost" onClick={() => run("text")} disabled={progress !== null}>Delete saved text only</Button>
+          <p className="text-xs text-slate-500">
+            Keeps the article lists and statistics, deletes only the stored text. Frees almost as much space.
+          </p>
+        </div>
+      </div>
+      {ask && <ConfirmDialog request={ask} onClose={() => setAsk(null)} />}
+    </Card>
   );
 }
 

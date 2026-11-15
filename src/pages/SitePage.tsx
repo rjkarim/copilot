@@ -94,7 +94,11 @@ export default function SitePage() {
   }
   async function openPreview(a: Article) {
     const { data } = await supabase.from("articles").select("title,content_html").eq("id", a.id).single();
-    setPreview({ title: data?.title ?? a.keyword, html: data?.content_html ?? "" });
+    setPreview({
+      title: data?.title ?? a.keyword,
+      html: data?.content_html ||
+        "<p>The saved text of this article was deleted to free up storage. Use Open post to read it on the website.</p>",
+    });
   }
 
   if (missing) return <Notice kind="error">Website not found. <Link to="/" className="underline">Back to dashboard</Link></Notice>;
