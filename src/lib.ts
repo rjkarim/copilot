@@ -37,6 +37,8 @@ export type Site = {
   amazon_version: string;
   has_amazon_keys: boolean;
   amazon_account_id: string | null;
+  /** Products to review per new article. */
+  product_count: number;
   // Old-post updater
   update_enabled: boolean;
   update_sleep_seconds: number;

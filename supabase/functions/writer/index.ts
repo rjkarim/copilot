@@ -243,6 +243,10 @@ async function writeArticle(id: string) {
   const keyword: string = a.keyword;
   // The Amazon search uses just the product words of it ("which is the best tent" -> "tent").
   const searchKeyword: string = isUpdate ? productKeyword(a.keyword) : a.keyword;
+  // How many products to review: the website's current setting, read when writing
+  // starts, so a change applies at once to every keyword still waiting.
+  const productCount: number =
+    Number(isUpdate ? site.update_product_count : site.product_count) || Number(a.product_count) || 5;
 
   try {
     let title: string = a.title ?? "";
@@ -264,7 +268,7 @@ async function writeArticle(id: string) {
       const report: Report = (step, progress) => set({ step, progress });
       cfg._usage = { in: 0, out: 0 };
       const draft = a.type === "review"
-        ? await writeReview(cfg, site, keyword, products, Number(a.product_count) || 5, a.include_faq !== false, report)
+        ? await writeReview(cfg, site, keyword, products, productCount, a.include_faq !== false, report)
         : await writeInformative(cfg, site, keyword, a.include_faq !== false, report);
       title = capitalize(noYear(draft.title));
       // Every article uses the H2 tag only once; each later heading moves one level down.

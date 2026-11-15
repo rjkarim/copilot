@@ -143,6 +143,7 @@ export default function SitePage() {
             <LiveStatus site={site} />
             {site.wp_error && <div className="mt-3"><Notice kind="error">WordPress: {site.wp_error}</Notice></div>}
             <SleepSetting site={site} lane="new" onDone={load} />
+            <ProductSetting site={site} onDone={load} />
           </Card>
           <KeywordForm site={site} onDone={load} />
         </>
@@ -265,6 +266,51 @@ function SleepSetting({ site, lane, onDone }: { site: Site; lane: "new" | "updat
         </Button>
         <span className="pb-2 text-xs text-slate-500">
           Currently {sleepLabel(saved ?? 0)}. You can change it at any time, also while articles are being written.
+        </span>
+      </div>
+      {msg && <div className="mt-2"><Notice kind={msg.kind}>{msg.text}</Notice></div>}
+    </div>
+  );
+}
+
+/** Products to review per article, with its own Save button. Applies to every keyword still waiting. */
+function ProductSetting({ site, onDone }: { site: Site; onDone: () => void }) {
+  const saved = site.product_count;
+  const [value, setValue] = useState(String(saved ?? 5));
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const count = Math.min(10, Math.max(1, Math.round(Number(value)) || 5));
+
+  async function save() {
+    setBusy(true);
+    const { error } = await supabase.from("websites").update({ product_count: count }).eq("id", site.id);
+    setBusy(false);
+    setValue(String(count));
+    setMsg(
+      error
+        ? {
+            kind: "error",
+            text: error.message.includes("product_count")
+              ? "Database update needed: run supabase/migrations/009_product_count_per_website.sql in the Supabase SQL Editor, then try again."
+              : error.message,
+          }
+        : { kind: "ok", text: `Saved. Review articles now cover ${count} products, starting with the next article.` },
+    );
+    onDone();
+  }
+  return (
+    <div className="mt-4 border-t border-slate-200 pt-4">
+      <div className="flex flex-wrap items-end gap-2">
+        <label className="block">
+          <span className="mb-1 block text-sm font-medium text-slate-700">Products to review per article</span>
+          <Input type="number" min={1} max={10} value={value} className="w-40"
+            onChange={(e) => { setValue(e.target.value); setMsg(null); }} />
+        </label>
+        <Button variant={count === saved ? "ghost" : "primary"} onClick={save} disabled={busy}>
+          {busy ? "Saving…" : "Save"}
+        </Button>
+        <span className="pb-2 text-xs text-slate-500">
+          Currently {saved ?? 5}. 10 are fetched from Amazon and the best are kept (1-10). Applies to all waiting keywords.
         </span>
       </div>
       {msg && <div className="mt-2"><Notice kind={msg.kind}>{msg.text}</Notice></div>}
@@ -419,7 +465,6 @@ function KeywordForm({ site, onDone }: { site: Site; onDone: () => void }) {
   const [msg, setMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
   const [categoryId, setCategoryId] = useState("");
-  const [productCount, setProductCount] = useState("5");
   const [includeFaq, setIncludeFaq] = useState(true);
   const [catState, setCatState] = useState<"loading" | "ready" | string>("loading");
 
@@ -450,7 +495,6 @@ function KeywordForm({ site, onDone }: { site: Site; onDone: () => void }) {
         website_id: site.id,
         keyword,
         type,
-        product_count: Math.min(10, Math.max(1, Math.round(Number(productCount)) || 5)),
         include_faq: includeFaq,
         wp_category_id: category?.id ?? null,
         wp_category_name: category?.name ?? null,
@@ -513,13 +557,6 @@ function KeywordForm({ site, onDone }: { site: Site; onDone: () => void }) {
               <option value="review">Amazon affiliate review</option>
               <option value="informative">Informative article</option>
             </Select>
-          </Field>
-          <Field
-            label="Products to review per article"
-            hint={type === "review" ? "10 are fetched from Amazon; the best ones are kept (1-10)" : "Only used for Amazon review articles"}
-          >
-            <Input type="number" min={1} max={10} value={productCount} disabled={type !== "review"}
-              onChange={(e) => setProductCount(e.target.value)} />
           </Field>
           <Field label="Post to WordPress as">
             <Select value={postStatus} onChange={(e) => setPostStatus(e.target.value as typeof postStatus)}>

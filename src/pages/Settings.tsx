@@ -105,9 +105,81 @@ export default function Settings() {
       <Button type="submit" disabled={busy}>{busy ? "Saving…" : "Save settings"}</Button>
     </form>
     <SleepForAll />
+    <ProductsForAll />
     <AmazonAccounts />
     <FreeStorage />
     </div>
+  );
+}
+
+/** One "products per review article" number for every website, for new articles and old-post updates. */
+function ProductsForAll() {
+  const session = useSession();
+  const [values, setValues] = useState({ product_count: "5", update_product_count: "5" });
+  const [busy, setBusy] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  type Key = keyof typeof values;
+
+  // Start the boxes at the number most websites use now.
+  useEffect(() => {
+    supabase.from("website_overview").select("product_count,update_product_count").then(({ data }) => {
+      if (!data?.length) return;
+      const common = (key: Key) => {
+        const counts = new Map<number, number>();
+        for (const row of data) if (row[key] != null) counts.set(row[key], (counts.get(row[key]) ?? 0) + 1);
+        return String([...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 5);
+      };
+      setValues({ product_count: common("product_count"), update_product_count: common("update_product_count") });
+    });
+  }, []);
+
+  async function apply(key: Key) {
+    const count = Math.min(10, Math.max(1, Math.round(Number(values[key])) || 5));
+    setBusy(key);
+    setMsg(null);
+    const { error, count: changed } = await supabase.from("websites")
+      .update({ [key]: count }, { count: "exact" }).eq("user_id", session.user.id);
+    setBusy(null);
+    setValues({ ...values, [key]: String(count) });
+    setMsg(
+      error
+        ? {
+            kind: "error",
+            text: error.message.includes("product_count")
+              ? "Database update needed: run supabase/migrations/009_product_count_per_website.sql in the Supabase SQL Editor, then try again."
+              : error.message,
+          }
+        : {
+            kind: "ok",
+            text: `Done. ${changed ?? "All"} websites now review ${count} products per ${key === "product_count" ? "new article" : "updated money post"}, starting with the next article.`,
+          },
+    );
+  }
+  const row = (key: Key, label: string) => (
+    <div className="flex flex-wrap items-end gap-2">
+      <label className="block">
+        <span className="mb-1 block text-sm font-medium text-slate-700">{label}</span>
+        <Input type="number" min={1} max={10} className="w-44" value={values[key]}
+          onChange={(e) => setValues({ ...values, [key]: e.target.value })} />
+      </label>
+      <Button type="button" onClick={() => apply(key)} disabled={busy !== null}>
+        {busy === key ? "Applying…" : "Apply to all websites"}
+      </Button>
+    </div>
+  );
+  return (
+    <Card className="space-y-4 p-5">
+      <div>
+        <h2 className="font-semibold">Products to review per article, for all websites</h2>
+        <p className="mt-0.5 text-sm text-slate-500">
+          Changes every website in one click (1-10). It applies to all keywords still waiting, starting with the next
+          article. A single website can still be given its own number on its page afterwards.
+        </p>
+      </div>
+      {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
+      {row("product_count", "In each new review article")}
+      {row("update_product_count", "In each updated money post")}
+    </Card>
   );
 }
 
