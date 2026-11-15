@@ -121,22 +121,19 @@ Deno.serve(async (req) => {
       .eq("id", body.website_id).eq("user_id", auth.user.id).maybeSingle();
     if (!site) return json({ ok: false, error: "Website not found." });
     const kind = body.lane === "update" ? "update" : "new";
-    const seconds = Math.max(0, Math.min(86400 * 7, Math.round(Number(body.seconds)) || 0));
-    const patch: Row = kind === "new" ? { sleep_seconds: seconds } : { update_sleep_seconds: seconds };
-    const { data: busy } = await admin.from("articles").select("id")
-      .eq("website_id", site.id).eq("kind", kind).eq("status", "writing").limit(1).maybeSingle();
-    let next: string | null = null;
-    // While an article is being written, the new sleep time simply applies when it finishes.
-    if (!busy) {
-      const { data: last } = await admin.from("articles").select("finished_at")
-        .eq("website_id", site.id).eq("kind", kind).not("finished_at", "is", null)
-        .order("finished_at", { ascending: false }).limit(1).maybeSingle();
-      const finished = last?.finished_at ? new Date(last.finished_at).getTime() : 0;
-      next = new Date(Math.max(Date.now(), finished + seconds * 1000)).toISOString();
-      patch[kind === "new" ? "next_run_at" : "update_next_run_at"] = next;
-    }
-    const { error } = await admin.from("websites").update(patch).eq("id", site.id);
-    return json(error ? { ok: false, error: error.message } : { ok: true, seconds, next });
+    const problem = await applySleep(site.id, kind, sleepSeconds(body.seconds));
+    return json(problem ? { ok: false, error: problem } : { ok: true });
+  }
+  // The same for every website of this user in one go (Settings > Sleep time for all websites).
+  if (body.action === "set_sleep_all") {
+    const kind = body.lane === "update" ? "update" : "new";
+    const seconds = sleepSeconds(body.seconds);
+    const { data: sites } = await admin.from("websites").select("id").eq("user_id", auth.user.id);
+    const results = await Promise.all((sites ?? []).map((s) => applySleep(s.id, kind, seconds)));
+    const failed = results.filter(Boolean);
+    return json(failed.length
+      ? { ok: false, error: `${failed.length} of ${results.length} websites could not be changed: ${failed[0]}` }
+      : { ok: true, websites: results.length, seconds });
   }
   if (body.action === "categories") {
     const { data: site } = await admin.from("websites").select("*")
@@ -155,6 +152,30 @@ Deno.serve(async (req) => {
 
 // deno-lint-ignore no-explicit-any
 type Row = Record<string, any>;
+
+const sleepSeconds = (value: unknown) => Math.max(0, Math.min(86400 * 7, Math.round(Number(value)) || 0));
+
+/**
+ * Sets one website's sleep time for new articles ("new") or old-post updates
+ * ("update"), effective immediately: a wait that is already running is re-timed
+ * from when the last article finished. Returns an error message, or null.
+ */
+async function applySleep(siteId: string, kind: "new" | "update", seconds: number): Promise<string | null> {
+  const patch: Row = kind === "new" ? { sleep_seconds: seconds } : { update_sleep_seconds: seconds };
+  const { data: busy } = await admin.from("articles").select("id")
+    .eq("website_id", siteId).eq("kind", kind).eq("status", "writing").limit(1).maybeSingle();
+  // While an article is being written, the new sleep time simply applies when it finishes.
+  if (!busy) {
+    const { data: last } = await admin.from("articles").select("finished_at")
+      .eq("website_id", siteId).eq("kind", kind).not("finished_at", "is", null)
+      .order("finished_at", { ascending: false }).limit(1).maybeSingle();
+    const finished = last?.finished_at ? new Date(last.finished_at).getTime() : 0;
+    patch[kind === "new" ? "next_run_at" : "update_next_run_at"] =
+      new Date(Math.max(Date.now(), finished + seconds * 1000)).toISOString();
+  }
+  const { error } = await admin.from("websites").update(patch).eq("id", siteId);
+  return error?.message ?? null;
+}
 
 // Errors that are retried automatically: anything from the AI provider, timeouts,
 // and dropped network connections (to the AI, Amazon or WordPress).

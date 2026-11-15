@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import {
-  addAmazonAccount, AMAZON_VERSIONS, loadAmazonAccounts, supabase, testConnection, useSession, type AmazonAccount,
+  addAmazonAccount, AMAZON_VERSIONS, loadAmazonAccounts, saveSleepForAll, supabase, testConnection, useSession, type AmazonAccount,
 } from "../lib";
 import { Button, Card, ConfirmDialog, Field, Input, Notice, Select, type ConfirmRequest } from "../ui";
 
@@ -104,8 +104,63 @@ export default function Settings() {
 
       <Button type="submit" disabled={busy}>{busy ? "Saving…" : "Save settings"}</Button>
     </form>
+    <SleepForAll />
     <AmazonAccounts />
     </div>
+  );
+}
+
+/** One sleep time for every website, separately for new articles and old-post updates. */
+function SleepForAll() {
+  const [values, setValues] = useState({ new: "60", update: "60" });
+  const [busy, setBusy] = useState<"new" | "update" | null>(null);
+  const [msg, setMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+
+  // Start the boxes at the most common current value, so you can see what is in use.
+  useEffect(() => {
+    supabase.from("website_overview").select("sleep_seconds,update_sleep_seconds").then(({ data }) => {
+      if (!data?.length) return;
+      const common = (key: "sleep_seconds" | "update_sleep_seconds") => {
+        const counts = new Map<number, number>();
+        for (const row of data) counts.set(row[key], (counts.get(row[key]) ?? 0) + 1);
+        return String([...counts.entries()].sort((a, b) => b[1] - a[1])[0][0] ?? 60);
+      };
+      setValues({ new: common("sleep_seconds"), update: common("update_sleep_seconds") });
+    });
+  }, []);
+
+  async function apply(lane: "new" | "update") {
+    setBusy(lane);
+    setMsg(null);
+    const res = await saveSleepForAll(lane, Math.max(0, Math.round(Number(values[lane])) || 0));
+    setBusy(null);
+    setMsg({ kind: res.ok ? "ok" : "error", text: res.text });
+  }
+  const row = (lane: "new" | "update", label: string) => (
+    <div className="flex flex-wrap items-end gap-2">
+      <label className="block">
+        <span className="mb-1 block text-sm font-medium text-slate-700">{label}</span>
+        <Input type="number" min={0} className="w-44" value={values[lane]}
+          onChange={(e) => setValues({ ...values, [lane]: e.target.value })} />
+      </label>
+      <Button type="button" onClick={() => apply(lane)} disabled={busy !== null}>
+        {busy === lane ? "Applying…" : "Apply to all websites"}
+      </Button>
+    </div>
+  );
+  return (
+    <Card className="space-y-4 p-5">
+      <div>
+        <h2 className="font-semibold">Sleep time for all websites</h2>
+        <p className="mt-0.5 text-sm text-slate-500">
+          Changes every website in one click and takes effect immediately, also while articles are being written. A
+          single website can still be given its own time on its page afterwards.
+        </p>
+      </div>
+      {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
+      {row("new", "After each new article (seconds)")}
+      {row("update", "After each old-post update (seconds)")}
+    </Card>
   );
 }
 

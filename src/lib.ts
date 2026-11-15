@@ -202,6 +202,19 @@ export async function saveSleep(websiteId: string, lane: "new" | "update", secon
   return data?.ok ? null : (data?.error ?? "Could not save the sleep time.");
 }
 
+/** Sets the sleep time of every website at once; effective immediately. */
+export async function saveSleepForAll(lane: "new" | "update", seconds: number): Promise<{ ok: boolean; text: string }> {
+  const { data, error } = await supabase.functions.invoke("writer", {
+    body: { action: "set_sleep_all", lane, seconds },
+  });
+  if (error) return { ok: false, text: await writerError(error) };
+  if (!data?.ok) return { ok: false, text: data?.error ?? "Could not change the sleep time." };
+  return {
+    ok: true,
+    text: `Done. ${data.websites} website${data.websites === 1 ? "" : "s"} now sleep ${sleepLabel(data.seconds)} after each ${lane === "new" ? "new article" : "old-post update"}, effective from now.`,
+  };
+}
+
 export function sleepLabel(seconds: number) {
   if (seconds < 60) return `${seconds}s`;
   if (seconds % 3600 === 0) return `${seconds / 3600}h`;
