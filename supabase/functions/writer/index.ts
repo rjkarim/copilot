@@ -783,6 +783,24 @@ const para = (text: unknown) => (text ? `<p>${esc(String(text))}</p>\n` : "");
 /** AI-written HTML with any bold or italic markup removed, so keywords are never highlighted. */
 const plain = (html: unknown) => String(html ?? "").replace(/<\/?(strong|b|em|i)(\s[^>]*)?>/gi, "");
 
+/**
+ * The intro is written in its own request, one paragraph per point, so it
+ * reliably reaches about 300-400 words (as one field of a bigger request the AI
+ * kept it near 150). Runs at the same time as the other sections.
+ */
+async function writeIntro(cfg: Row, context: string, points: string[], rules = ""): Promise<Row> {
+  return await askOpenAI(cfg, STYLE + rules,
+    context + `Write the introduction of this article: exactly ${points.length} paragraphs, in this order:\n` +
+      points.map((p, i) => `${i + 1}. ${p}`).join("\n") +
+      `\nEach paragraph is plain text of 55-75 words (3-4 sentences). Together they make about ${points.length * 60} words. ` +
+      `Use the exact keyword once in the first paragraph. No headings.\n` +
+      `JSON shape: {"paragraphs": string[] (exactly ${points.length})}`);
+}
+function introHtml(intro: Row): string {
+  const parts = Array.isArray(intro?.paragraphs) ? intro.paragraphs : [];
+  return parts.map((p: unknown) => para(plain(p))).join("");
+}
+
 function faqHtml(heading: unknown, faq: unknown) {
   if (!Array.isArray(faq) || faq.length === 0) return "";
   return `<h2>${esc(String(heading || "Frequently Asked Questions"))}</h2>\n` +
@@ -799,8 +817,6 @@ async function writeInformative(cfg: Row, site: Row, keyword: string, withFaq: b
       `Cover what a searcher of this keyword wants to know, in the order they need it.\n` +
       `JSON shape: {"title": string (creative and specific, 50-60 characters including spaces, keyword near the start, every word capitalised, abbreviations in capitals such as UV, RV, LED), ` +
       `"meta_description": string (140-155 characters, includes the keyword), ` +
-      `"intro_html": string (5-6 short paragraphs, 280-380 words: answer the main question straight away, then why it matters, ` +
-      `who this is for, the most common mistake or misunderstanding, and what the article covers), ` +
       `"outline": [{"heading": string, "brief": string (max 20 words: what the section covers)}] (5-6 sections, no FAQ or conclusion), ` +
       (withFaq ? `"faq_heading": string, ` : "") + `"conclusion_heading": string}`,
   );
@@ -811,7 +827,15 @@ async function writeInformative(cfg: Row, site: Row, keyword: string, withFaq: b
   const context = `Article "${plan.title}", keyword "${keyword}", language ${site.language}. ` +
     `Sections: ${outline.map((s) => s.heading).join(" | ")}\n`;
 
-  const [closing, ...sections] = await inParallel<Row>([
+  const [intro, closing, ...sections] = await inParallel<Row>([
+    () => writeIntro(cfg, context, [
+      "Answer the main question of the keyword straight away, in plain words.",
+      "Explain why this matters to the reader and what goes wrong when it is ignored.",
+      "Say who this article is for and in which situations the answer changes.",
+      "Describe the most common mistake or misunderstanding about this topic and the better approach.",
+      "Give one practical tip or concrete fact the reader can use right away.",
+      "Tell the reader what the following sections cover, in a natural sentence, not a list.",
+    ]),
     () => askOpenAI(cfg, STYLE,
       context + `Write the closing parts.\nJSON shape: {` + (withFaq ? FAQ_SHAPE : "") +
         `"conclusion_html": string (60-90 words: the key takeaway and a next step)}`),
@@ -820,7 +844,7 @@ async function writeInformative(cfg: Row, site: Row, keyword: string, withFaq: b
         `JSON shape: {"html": string (130-200 words; use h3 or a list where it helps)}`)),
   ], report);
 
-  let html = `${plain(plan.intro_html)}\n`;
+  let html = introHtml(intro);
   outline.forEach((s, i) => { html += `<h2>${esc(String(s.heading ?? ""))}</h2>\n${plain(sections[i]?.html)}\n`; });
   if (withFaq) html += faqHtml(plan.faq_heading, closing.faq);
   html += `<h2>${esc(String(plan.conclusion_heading || "Final Thoughts"))}</h2>\n${plain(closing.conclusion_html)}`;
@@ -880,9 +904,6 @@ async function writeReview(
       `write abbreviations in capitals (UV, RV, LED, USB, TV); ` +
       `no generic "Reviews & Buyer's Guide" ending), ` +
       `"meta_description": string (140-155 characters, includes the keyword and the number ${count}), ` +
-      `"intro_html": string (5-6 short paragraphs, 300-400 words: the buyer's problem and who this guide is for, the 3-4 factors that matter most ` +
-      `when choosing and why, common buying mistakes, how these picks were selected (from Amazon listings, features and customer ratings when given), ` +
-      `a one-sentence preview of the top pick, and what the guide covers), ` +
       `"glance_heading": string (like "Our Top ${count} <keyword> Picks at a Glance"), ` +
       `"reviews_heading": string (like "Top ${count} <keyword>: Detailed Reviews"), ` +
       `"buying_guide_heading": string, ` + (withFaq ? `"faq_heading": string, ` : "") + `"conclusion_heading": string, ` +
@@ -904,7 +925,15 @@ async function writeReview(
     picks.map((x, i) => `${i + 1}) ${x.r.name ?? x.p.title} - ${x.r.best_for ?? ""}`).join("; ") + "\n";
 
   // 2) Everything else at the same time: one small request per product, plus one for the closing parts.
-  const [closing, ...reviews] = await inParallel<Row>([
+  const [intro, closing, ...reviews] = await inParallel<Row>([
+    () => writeIntro(cfg, context, [
+      "Describe the buyer's problem and who this guide is for, using the keyword naturally.",
+      "Explain the three or four factors that matter most when choosing this kind of product, and why each one matters.",
+      "Point out common buying mistakes and what they cost the buyer.",
+      "Explain how these picks were chosen: from Amazon listings, their features and specifications, and customer ratings where available. Do not claim hands-on testing.",
+      `Preview the top pick (${picks[0].r.name ?? picks[0].p.title}) in one or two sentences and why it leads the list.`,
+      "Tell the reader what the guide covers next: the comparison table, the detailed reviews and the buying guide, in a natural sentence.",
+    ], REVIEW_RULES),
     () => askOpenAI(cfg, STYLE + REVIEW_RULES,
       context + `Write the closing parts. The buying guide explains how to choose in general; it does not review the picks.\n` +
         `JSON shape: {"buying_guide_html": string (300-400 words; 3-4 h3 subsections on the factors that decide a good purchase), ` +
@@ -935,7 +964,7 @@ async function writeReview(
     p.rating ? `${p.rating.toFixed(1)}/5${p.reviews ? ` (${p.reviews.toLocaleString("en-US")})` : ""}` : "";
   const anyRating = picks.some(({ p }) => p.rating);
 
-  let html = `<p><em>As an Amazon Associate I earn from qualifying purchases.</em></p>\n${plain(plan.intro_html)}\n`;
+  let html = `<p><em>As an Amazon Associate I earn from qualifying purchases.</em></p>\n` + introHtml(intro);
 
   html += `<h2>${esc(String(plan.glance_heading || `Our Top ${picks.length} Picks at a Glance`))}</h2>\n` +
     `<table><tr><th></th><th>${esc(L.product)}</th>${anyRating ? `<th>${esc(L.rating)}</th>` : ""}<th></th></tr>` +
