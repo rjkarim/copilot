@@ -272,7 +272,7 @@ async function writeArticle(id: string) {
         : await writeInformative(cfg, site, keyword, a.include_faq !== false, report);
       title = await fitTitle(cfg, capitalize(noYear(draft.title)), keyword);
       // Every article uses the H2 tag only once; each later heading moves one level down.
-      html = singleH2(draft.html);
+      html = capitalizeHeadings(singleH2(draft.html));
       excerpt = draft.excerpt;
       await set({ title, content_html: html, word_count: countWords(html) });
       // Separate update: if the token columns are missing, the article itself is still saved.
@@ -369,6 +369,12 @@ function noYear(title: string): string {
     .replace(/\s+([:,!?])/g, "$1").replace(/\s{2,}/g, " ").replace(/^[\s:,-]+|[\s:,-]+$/g, "");
 }
 
+/** Puts the text of every heading (h1-h6) in Capitalize Case, like the title. Tags inside are kept. */
+function capitalizeHeadings(html: string): string {
+  return html.replace(/(<h([1-6])\b[^>]*>)([\s\S]*?)(<\/h\2>)/gi, (_m, open, _level, inner, close) =>
+    open + inner.replace(/(^|>)([^<]+)/g, (_t: string, edge: string, text: string) => edge + capitalize(text)) + close);
+}
+
 const TITLE_MIN = 50;
 const TITLE_MAX = 60;
 
@@ -425,12 +431,13 @@ function capitalize(title: string): string {
   if (letters.length > 8 && letters === letters.toUpperCase()) title = title.toLowerCase();
   return title
     .replace(/[^\s-]+/g, (word) =>
-      /[A-Z]/.test(word.slice(1)) ? word : word.replace(/\p{L}/u, (c) => c.toUpperCase()))
+      // HTML entities such as &amp; are left exactly as they are.
+      /^&[a-z0-9#]+;/i.test(word) || /[A-Z]/.test(word.slice(1)) ? word : word.replace(/\p{L}/u, (c) => c.toUpperCase()))
     // Common abbreviations are written in capitals even when the keyword was typed in lowercase.
-    .replace(ABBREVIATIONS, (word) => word.toUpperCase());
+    .replace(ABBREVIATIONS, (word) => (word.toLowerCase() === "faqs" ? "FAQs" : word.toUpperCase()));
 }
 const ABBREVIATIONS =
-  /\b(uv|rv|led|usb|tv|cpap|diy|gps|hd|uhd|4k|suv|atv|utv|ssd|hdmi|bbq|spf|bpa|cbd|ac|dc|pc|nfc|rgb|oled|qled|lcd|dslr|abs|pvc|hvac|ev|rc|xl|xxl|usa|uk)\b/gi;
+  /\b(faq|faqs|uv|rv|led|usb|tv|cpap|diy|gps|hd|uhd|4k|suv|atv|utv|ssd|hdmi|bbq|spf|bpa|cbd|ac|dc|pc|nfc|rgb|oled|qled|lcd|dslr|abs|pvc|hvac|ev|rc|xl|xxl|usa|uk)\b/gi;
 
 /** "which is the best camping lantern" -> "camping lantern" (what to search on Amazon). */
 function productKeyword(title: string): string {
