@@ -270,7 +270,7 @@ async function writeArticle(id: string) {
       const draft = a.type === "review"
         ? await writeReview(cfg, site, keyword, products, productCount, a.include_faq !== false, report)
         : await writeInformative(cfg, site, keyword, a.include_faq !== false, report);
-      title = capitalize(noYear(draft.title));
+      title = await fitTitle(cfg, capitalize(noYear(draft.title)), keyword);
       // Every article uses the H2 tag only once; each later heading moves one level down.
       html = singleH2(draft.html);
       excerpt = draft.excerpt;
@@ -367,6 +367,49 @@ function noYear(title: string): string {
     .replace(/\s*\b(in|of|for)\s+\(?(19|20)\d{2}\)?(?=\W|$)/gi, "")
     .replace(/\s*[\[(]?\b(19|20)\d{2}\b[\])]?/g, "")
     .replace(/\s+([:,!?])/g, "$1").replace(/\s{2,}/g, " ").replace(/^[\s:,-]+|[\s:,-]+$/g, "");
+}
+
+const TITLE_MIN = 50;
+const TITLE_MAX = 60;
+
+/**
+ * SEO titles must be 50-60 characters. A title outside that range is sent back to
+ * the AI with its exact length (a tiny request, at most twice). If it is still too
+ * long it is shortened at a word boundary; a title still too short is kept.
+ */
+async function fitTitle(cfg: Row, title: string, keyword: string): Promise<string> {
+  for (let i = 0; i < 2 && (title.length < TITLE_MIN || title.length > TITLE_MAX); i++) {
+    try {
+      const d = await askOpenAI(
+        cfg,
+        "You edit SEO titles. Reply with one JSON object only.",
+        `This title has ${title.length} characters: "${title}"\n` +
+          `Rewrite it to between ${TITLE_MIN} and ${TITLE_MAX} characters including spaces ` +
+          `(${title.length > TITLE_MAX ? "shorter" : "a little longer"}). Keep the keyword "${keyword}", keep the number if there is one, ` +
+          `keep the meaning and style, no year, every word capitalised.\nJSON shape: {"title": string}`,
+      );
+      if (d.title) title = capitalize(noYear(String(d.title)));
+    } catch {
+      break;
+    }
+  }
+  return title.length > TITLE_MAX ? cutTitle(title, TITLE_MAX) : title;
+}
+
+/** Shortens a title at a word boundary without leaving a dangling "and", "for", ":" and so on. */
+function cutTitle(title: string, max: number): string {
+  let words = title.slice(0, max + 1).split(" ");
+  if (title.length > max) words.pop();
+  const dangling = /^(and|or|for|with|to|of|the|a|an|in|on|that|your|&|-|–|—|:)$/i;
+  while (words.length > 1 && (dangling.test(words[words.length - 1]) || /[:,–—-]$/.test(words[words.length - 1]))) {
+    const last = words[words.length - 1];
+    if (/[:,–—-]$/.test(last) && !dangling.test(last)) {
+      words[words.length - 1] = last.replace(/[:,–—-]+$/, "");
+      break;
+    }
+    words.pop();
+  }
+  return words.join(" ").trim();
 }
 
 /**
@@ -741,7 +784,7 @@ async function writeInformative(cfg: Row, site: Row, keyword: string, withFaq: b
     STYLE,
     `Plan an informative article in ${site.language} for the keyword "${keyword}". ` +
       `Cover what a searcher of this keyword wants to know, in the order they need it.\n` +
-      `JSON shape: {"title": string (creative and specific, 50-62 characters, keyword near the start, every word capitalised, abbreviations in capitals such as UV, RV, LED), ` +
+      `JSON shape: {"title": string (creative and specific, 50-60 characters including spaces, keyword near the start, every word capitalised, abbreviations in capitals such as UV, RV, LED), ` +
       `"meta_description": string (140-155 characters, includes the keyword), ` +
       `"intro_html": string (3-5 short paragraphs; answer the main question straight away), ` +
       `"outline": [{"heading": string, "brief": string (max 20 words: what the section covers)}] (5-6 sections, no FAQ or conclusion), ` +
@@ -815,7 +858,7 @@ async function writeReview(
       `Pick the ${count} best of these Amazon products: they must match the keyword, differ from each other ` +
       `(no colour or size variants) and cover different needs or budgets. Best first. Keep each asin exactly.\n` +
       `Products: ${JSON.stringify(products.map((p) => facts(p, 4, 110)))}\n` +
-      `JSON shape: {"title": string (creative, click-worthy and SEO-friendly, 50-65 characters, every word capitalised; ` +
+      `JSON shape: {"title": string (creative, click-worthy and SEO-friendly, 50-60 characters including spaces, every word capitalised; ` +
       `it MUST contain the number ${count} and the keyword, and it MUST follow this pattern: ${titlePattern(count)} ` +
       `Fill the "..." with a specific benefit, use or audience that fits these products; do not repeat a word such as "Best" twice. ` +
       `The title must read as correct, natural English: after a number greater than 1 make the keyword's product noun plural ` +

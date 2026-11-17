@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, Navigate, useParams } from "react-router-dom";
 import { fetchCategories, saveSleep, sleepLabel, supabase, useLive, type Article, type Category, type Site } from "../lib";
 import { Button, Card, ConfirmDialog, Field, Input, LiveStatus, Modal, Notice, Select, StatusBadge, Textarea, type ConfirmRequest } from "../ui";
 
@@ -32,7 +32,8 @@ export default function SitePage() {
   useLive(load, `site-${id}-${mode}-${filter}`);
 
   async function retry(a: Article) {
-    await supabase.from("articles").update({ status: "queued", error: null, progress: 0, step: null }).eq("id", a.id);
+    // attempts back to 0, so the automatic retries are available again.
+    await supabase.from("articles").update({ status: "queued", error: null, progress: 0, step: null, attempts: 0 }).eq("id", a.id);
     load();
   }
   // Stops an article that is being written. The background writer notices and
@@ -44,7 +45,7 @@ export default function SitePage() {
     load();
   }
   async function retryAllFailed() {
-    await supabase.from("articles").update({ status: "queued", error: null, progress: 0, step: null })
+    await supabase.from("articles").update({ status: "queued", error: null, progress: 0, step: null, attempts: 0 })
       .eq("website_id", id).eq("kind", mode).eq("status", "failed");
     load();
   }
@@ -101,7 +102,8 @@ export default function SitePage() {
     });
   }
 
-  if (missing) return <Notice kind="error">Website not found. <Link to="/" className="underline">Back to dashboard</Link></Notice>;
+  // A website that no longer exists (or a mistyped address) goes straight to the dashboard.
+  if (missing) return <Navigate to="/" replace />;
   if (!site) return null;
 
   const counts: Record<Filter, number> = {

@@ -64,7 +64,32 @@ export default function Dashboard() {
     });
   }
 
-  const sum = (k: "queued" | "writing" | "completed" | "failed" | "wp_published" | "wp_drafts") =>
+  // Puts every failed article of every website back in the queue, for new articles or old-post updates.
+  const [retrying, setRetrying] = useState<"new" | "update" | null>(null);
+  const [retryMsg, setRetryMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  async function retryAll(kind: "new" | "update") {
+    setRetrying(kind);
+    setRetryMsg(null);
+    const { error, count } = await supabase.from("articles")
+      .update({ status: "queued", error: null, progress: 0, step: null, finished_at: null, attempts: 0 }, { count: "exact" })
+      .eq("kind", kind).eq("status", "failed");
+    setRetrying(null);
+    const stopped = (sites ?? []).filter((s) => !s.update_enabled && s.updates_failed > 0).length;
+    setRetryMsg(
+      error
+        ? { kind: "error", text: error.message }
+        : {
+            kind: "ok",
+            text: kind === "new"
+              ? `${count ?? 0} failed articles are back in the queue on all websites.`
+              : `${count ?? 0} failed post updates are back in the queue.` +
+                (stopped ? ` ${stopped} of those websites have the updater stopped; their updates run once you start it.` : ""),
+          },
+    );
+    load();
+  }
+
+  const sum = (k: "queued" | "writing" | "completed" | "failed" | "wp_published" | "wp_drafts" | "updates_failed") =>
     (sites ?? []).reduce((n, s) => n + (s[k] ?? 0), 0);
   const stats = [
     { label: "Websites", value: sites?.length ?? 0 },
@@ -120,6 +145,22 @@ export default function Dashboard() {
         ))}
       </div>
 
+      {/* Always visible once there is a website; a button is greyed out while it has nothing to retry. */}
+      {sites && sites.length > 0 && (
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm text-slate-600">All websites:</span>
+            <Button variant="ghost" onClick={() => retryAll("new")} disabled={retrying !== null || sum("failed") === 0}>
+              {retrying === "new" ? "Retrying…" : `Retry all failed new articles (${sum("failed")})`}
+            </Button>
+            <Button variant="ghost" onClick={() => retryAll("update")} disabled={retrying !== null || sum("updates_failed") === 0}>
+              {retrying === "update" ? "Retrying…" : `Retry all failed post updates (${sum("updates_failed")})`}
+            </Button>
+          </div>
+          {retryMsg && <Notice kind={retryMsg.kind}>{retryMsg.text}</Notice>}
+        </div>
+      )}
+
       {sites && sites.length === 0 && (
         <Card className="p-10 text-center">
           <h2 className="font-semibold">Add your first website</h2>
@@ -161,11 +202,19 @@ export default function Dashboard() {
                   No Amazon Creators API credentials yet — click Edit to add them (needed for review articles).
                 </div>
               )}
-              {(s.update_enabled || s.updates_done > 0) && (
-                <div className="flex items-center gap-2 text-xs text-slate-600">
-                  <span className={`inline-block h-2 w-2 rounded-full ${s.update_enabled ? "animate-pulse bg-emerald-500" : "bg-slate-300"}`} />
-                  Old-post updater {s.update_enabled ? "running" : "stopped"} · {s.updates_done} updated
-                  {s.update_keyword ? ` · now: ${s.update_keyword}` : ""}
+              {(s.update_enabled || s.updates_done > 0 || s.updates_failed > 0 || s.update_remaining != null) && (
+                <div className="space-y-2 rounded-lg border border-slate-200 p-3">
+                  <div className="flex items-center gap-2 text-xs text-slate-600">
+                    <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${s.update_enabled ? "animate-pulse bg-emerald-500" : "bg-slate-300"}`} />
+                    <span className="font-medium">Old-post updates</span>
+                    <span>· {s.update_enabled ? "running" : "stopped"}</span>
+                    {s.update_keyword && <span className="truncate">· now: {s.update_keyword}</span>}
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 text-center">
+                    <Num label="Updated" value={s.updates_done} tone="text-emerald-600" />
+                    <Num label="Failed" value={s.updates_failed} tone={s.updates_failed ? "text-red-600" : "text-slate-400"} />
+                    <Num label="Posts left" value={s.update_remaining} tone="text-slate-700" />
+                  </div>
                 </div>
               )}
               <div className="text-xs text-slate-500">
