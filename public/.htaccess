@@ -1,0 +1,13 @@
+# Single-page app: every address that is not a real file is answered with
+# index.html, so reloading /settings, /stats or /sites/... works instead of
+# showing the host's "page does not exist" page. The app itself then sends
+# unknown addresses to the dashboard.
+# For Apache / LiteSpeed hosting such as Hostinger.
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /
+  RewriteRule ^index\.html$ - [L]
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule . /index.html [L]
+</IfModule>
