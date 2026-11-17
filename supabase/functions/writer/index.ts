@@ -385,7 +385,10 @@ async function fitTitle(cfg: Row, title: string, keyword: string): Promise<strin
         "You edit SEO titles. Reply with one JSON object only.",
         `This title has ${title.length} characters: "${title}"\n` +
           `Rewrite it to between ${TITLE_MIN} and ${TITLE_MAX} characters including spaces ` +
-          `(${title.length > TITLE_MAX ? "shorter" : "a little longer"}). Keep the keyword "${keyword}", keep the number if there is one, ` +
+          (title.length > TITLE_MAX
+            ? `(about ${title.length - 55} characters shorter). `
+            : `(add about ${55 - title.length} characters: a short benefit, use or audience phrase such as "For Small Kitchens" or "That Last All Day"). `) +
+          `Keep the keyword "${keyword}", keep the number if there is one, ` +
           `keep the meaning and style, no year, every word capitalised.\nJSON shape: {"title": string}`,
       );
       if (d.title) title = capitalize(noYear(String(d.title)));
@@ -417,6 +420,9 @@ function cutTitle(title: string, max: number): string {
  * hyphen ("top-rated" -> "Top-Rated"). Words with their own capitals (USB, iPhone) are kept.
  */
 function capitalize(title: string): string {
+  // A title written ALL IN CAPITALS (often copied from a keyword typed that way) is lowered first.
+  const letters = title.replace(/[^\p{L}]/gu, "");
+  if (letters.length > 8 && letters === letters.toUpperCase()) title = title.toLowerCase();
   return title
     .replace(/[^\s-]+/g, (word) =>
       /[A-Z]/.test(word.slice(1)) ? word : word.replace(/\p{L}/u, (c) => c.toUpperCase()))
