@@ -799,7 +799,8 @@ async function writeInformative(cfg: Row, site: Row, keyword: string, withFaq: b
       `Cover what a searcher of this keyword wants to know, in the order they need it.\n` +
       `JSON shape: {"title": string (creative and specific, 50-60 characters including spaces, keyword near the start, every word capitalised, abbreviations in capitals such as UV, RV, LED), ` +
       `"meta_description": string (140-155 characters, includes the keyword), ` +
-      `"intro_html": string (3-5 short paragraphs; answer the main question straight away), ` +
+      `"intro_html": string (5-6 short paragraphs, 280-380 words: answer the main question straight away, then why it matters, ` +
+      `who this is for, the most common mistake or misunderstanding, and what the article covers), ` +
       `"outline": [{"heading": string, "brief": string (max 20 words: what the section covers)}] (5-6 sections, no FAQ or conclusion), ` +
       (withFaq ? `"faq_heading": string, ` : "") + `"conclusion_heading": string}`,
   );
@@ -879,7 +880,9 @@ async function writeReview(
       `write abbreviations in capitals (UV, RV, LED, USB, TV); ` +
       `no generic "Reviews & Buyer's Guide" ending), ` +
       `"meta_description": string (140-155 characters, includes the keyword and the number ${count}), ` +
-      `"intro_html": string (3-5 short paragraphs: the buyer's problem, what matters when choosing, how these picks were selected, what the guide covers), ` +
+      `"intro_html": string (5-6 short paragraphs, 300-400 words: the buyer's problem and who this guide is for, the 3-4 factors that matter most ` +
+      `when choosing and why, common buying mistakes, how these picks were selected (from Amazon listings, features and customer ratings when given), ` +
+      `a one-sentence preview of the top pick, and what the guide covers), ` +
       `"glance_heading": string (like "Our Top ${count} <keyword> Picks at a Glance"), ` +
       `"reviews_heading": string (like "Top ${count} <keyword>: Detailed Reviews"), ` +
       `"buying_guide_heading": string, ` + (withFaq ? `"faq_heading": string, ` : "") + `"conclusion_heading": string, ` +
