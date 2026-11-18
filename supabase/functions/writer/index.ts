@@ -523,7 +523,7 @@ async function wpNextOldPost(site: Row): Promise<{ post: Row; remaining: number 
   for (let round = 0; round < 10; round++) {
     // "after" is exclusive, so step one second back and skip the posts already handled.
     const after = cursor ? new Date(new Date(cursor + "Z").getTime() - 1000).toISOString().slice(0, 19) : null;
-    const res = await fetch(
+    const res = await wpFetch(
       `${api}/posts?status=publish&orderby=date&order=asc&per_page=20&_fields=id,date,link,slug,title` +
         (after ? `&after=${encodeURIComponent(after)}` : ""),
       { headers },
@@ -554,7 +554,7 @@ async function wpNextOldPost(site: Row): Promise<{ post: Row; remaining: number 
 async function wpUpdatePost(site: Row, postId: number, title: string, content: string, excerpt: string, oldLink: string) {
   const { api, headers } = wp(site);
   const dateInUrl = /\/(19|20)\d{2}\/\d{1,2}(\/|$)/.test(oldLink);
-  const res = await fetch(`${api}/posts/${postId}`, {
+  const res = await wpFetch(`${api}/posts/${postId}`, {
     method: "POST",
     headers,
     body: JSON.stringify({
@@ -563,7 +563,11 @@ async function wpUpdatePost(site: Row, postId: number, title: string, content: s
     }),
   });
   if (!res.ok) throw new Error(await wpError(res));
-  return await res.json() as { id: number; link: string; status: string };
+  const post = await res.json();
+  if (!post?.id || Array.isArray(post)) {
+    throw new Error("WordPress did not confirm the update. Check the website URL (https:// and www).");
+  }
+  return post as { id: number; link: string; status: string };
 }
 
 // ------------------------------------------------------------------ Amazon Creators API
@@ -1012,6 +1016,23 @@ function wp(site: Row) {
   };
 }
 
+/**
+ * fetch() for WordPress that keeps POST a POST across redirects. A site saved
+ * as http:// that redirects to https:// (or to www.) would otherwise have its
+ * save request silently turned into a read: WordPress answers with the old post
+ * and the article looks "updated" while nothing changed on the site.
+ */
+async function wpFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  let target = url;
+  for (let hop = 0; hop < 4; hop++) {
+    const res = await fetch(target, { ...init, redirect: "manual" });
+    const next = res.headers.get("location");
+    if (res.status < 300 || res.status >= 400 || !next) return res;
+    target = new URL(next, target).toString();
+  }
+  throw new Error("WordPress redirected too many times. Check the website URL (https:// and www).");
+}
+
 async function wpError(res: Response): Promise<string> {
   const data = await res.json().catch(() => null);
   return `WordPress replied ${res.status}: ${data?.message ?? "request failed"}`;
@@ -1021,7 +1042,7 @@ async function wpCreatePost(
   site: Row, title: string, content: string, excerpt: string, categoryId?: number | null, keyword?: string,
 ) {
   const { api, headers } = wp(site);
-  const res = await fetch(`${api}/posts`, {
+  const res = await wpFetch(`${api}/posts`, {
     method: "POST",
     headers,
     body: JSON.stringify({
@@ -1032,7 +1053,10 @@ async function wpCreatePost(
     }),
   });
   if (!res.ok) throw new Error(await wpError(res));
-  return await res.json() as { id: number; link: string; status: string };
+  const post = await res.json();
+  // A real save returns the new post; a list or nothing means it never reached WordPress as a save.
+  if (!post?.id || Array.isArray(post)) throw new Error("WordPress did not confirm the new post. Check the website URL (https:// and www).");
+  return post as { id: number; link: string; status: string };
 }
 
 // All categories of the website, read live from WordPress (up to 1000).
@@ -1040,7 +1064,7 @@ async function wpCategories(site: Row) {
   const { api, headers } = wp(site);
   const all: { id: number; name: string; parent: number }[] = [];
   for (let page = 1; page <= 10; page++) {
-    const res = await fetch(`${api}/categories?per_page=100&page=${page}&orderby=name&_fields=id,name,parent`, { headers });
+    const res = await wpFetch(`${api}/categories?per_page=100&page=${page}&orderby=name&_fields=id,name,parent`, { headers });
     if (!res.ok) throw new Error(await wpError(res));
     const batch = await res.json();
     all.push(...batch);
@@ -1057,7 +1081,7 @@ async function wpMe(site: Row) {
   const { api, headers } = wp(site);
   let res: Response;
   try {
-    res = await fetch(`${api}/users/me?context=edit&_fields=name,capabilities`, { headers });
+    res = await wpFetch(`${api}/users/me?context=edit&_fields=name,capabilities`, { headers });
   } catch {
     throw new Error("Could not reach the website. Check the WordPress URL.");
   }
@@ -1069,7 +1093,7 @@ async function wpMe(site: Row) {
 
 async function wpCount(site: Row, status: string): Promise<number> {
   const { api, headers } = wp(site);
-  const res = await fetch(`${api}/posts?status=${status}&per_page=1&_fields=id`, { headers });
+  const res = await wpFetch(`${api}/posts?status=${status}&per_page=1&_fields=id`, { headers });
   if (!res.ok) throw new Error(await wpError(res));
   return Number(res.headers.get("X-WP-Total") ?? 0);
 }
