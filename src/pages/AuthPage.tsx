@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { supabase } from "../lib";
 import { Button, Field, Input, Notice, ThemeToggle } from "../ui";
+import AuthBackground from "./AuthBackground";
 
 export default function AuthPage() {
   const [mode, setMode] = useState<"login" | "signup">("login");
@@ -36,8 +37,9 @@ export default function AuthPage() {
 
   return (
     <div className="relative flex min-h-screen items-center justify-center p-4">
-      <ThemeToggle className="absolute right-4 top-4" />
-      <div className="w-full max-w-sm">
+      <AuthBackground />
+      <ThemeToggle className="absolute right-4 top-4 z-10" />
+      <div className="relative z-10 w-full max-w-sm">
         <div className="mb-6 text-center">
           <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-xl bg-indigo-600 text-lg font-semibold text-white">
             A
@@ -45,7 +47,7 @@ export default function AuthPage() {
           <h1 className="text-xl font-semibold">AffiliWriter</h1>
           <p className="mt-1 text-sm text-slate-500">Bulk Amazon review and informative articles for your websites</p>
         </div>
-        <form onSubmit={submit} className="space-y-4 rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+        <form onSubmit={submit} className="space-y-4 rounded-xl border border-slate-200 bg-white/90 p-6 shadow-xl backdrop-blur-md dark:bg-[#131c2e]/85">
           <h2 className="font-semibold">{mode === "login" ? "Log in" : "Create your account"}</h2>
           {error && <Notice kind="error">{error}</Notice>}
           {info && <Notice kind="ok">{info}</Notice>}
