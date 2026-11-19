@@ -273,6 +273,8 @@ async function writeArticle(id: string) {
       title = await fitTitle(cfg, capitalize(noYear(draft.title)), keyword);
       // Every article uses the H2 tag only once; each later heading moves one level down.
       html = capitalizeHeadings(singleH2(draft.html));
+      // Informative articles never carry an affiliate disclosure.
+      if (a.type !== "review") html = noDisclosure(html);
       excerpt = draft.excerpt;
       await set({ title, content_html: html, word_count: countWords(html) });
       // Separate update: if the token columns are missing, the article itself is still saved.
@@ -446,6 +448,12 @@ function productKeyword(title: string): string {
   while (words.length && drop.test(words[0])) words.shift();
   while (words.length && drop.test(words[words.length - 1])) words.pop();
   return words.join(" ") || title;
+}
+
+/** Removes any paragraph that is an affiliate disclosure (used for informative articles). */
+function noDisclosure(html: string): string {
+  const disclosure = /affiliate (fees|links?|commissions?)|earn (a )?(small )?(commission|fees?)|qualifying purchases|at no (additional|extra) cost to you|amazon associate/i;
+  return html.replace(/<p[^>]*>[\s\S]*?<\/p>\s*/gi, (para) => (disclosure.test(para) ? "" : para));
 }
 
 /** Keeps the first H2; later H2s become H3, and the headings below them move down one level too. */
@@ -754,6 +762,7 @@ const STYLE = [
   "SEO: use the exact keyword naturally in the first 100 words and once in a subheading; elsewhere use natural variations. Never stuff keywords.",
   "HTML fragments may use only: p, h3, ul, ol, li. No h1 or h2, links, images or markdown. Never bold or italicise anything: no strong, b, em or i tags, and never highlight the keyword.",
   "Titles never contain a year.",
+  "Never write an affiliate disclosure or disclaimer (for example 'we may earn affiliate fees' or 'as an Amazon Associate'); the page adds its own where needed.",
   "Reply with one JSON object only, in the requested shape.",
 ].join("\n");
 
