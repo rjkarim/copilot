@@ -1,8 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import {
-  addAmazonAccount, AMAZON_VERSIONS, clearHistoryForAll, loadAmazonAccounts, pushCss, saveSleepForAll, supabase, testConnection, useSession, type AmazonAccount,
+  addAmazonAccount, AMAZON_VERSIONS, clearHistoryForAll, loadAmazonAccounts, saveSleepForAll, supabase, testConnection, useSession, type AmazonAccount,
 } from "../lib";
-import { Button, Card, ConfirmDialog, Field, Input, Notice, Select, Textarea, type ConfirmRequest } from "../ui";
+import { Button, Card, ConfirmDialog, Field, Input, Notice, Select, type ConfirmRequest } from "../ui";
 
 type Saved = { openai_model: string; openai_base_url: string; has_openai_key: boolean };
 const DEFAULT_BASE = "https://api.openai.com/v1";
@@ -106,7 +106,6 @@ export default function Settings() {
     </form>
     <SleepForAll />
     <ProductsForAll />
-    <CustomCss />
     <AmazonAccounts />
     <FreeStorage />
     </div>
@@ -243,44 +242,6 @@ function FreeStorage() {
         </div>
       </div>
       {ask && <ConfirmDialog request={ask} onClose={() => setAsk(null)} />}
-    </Card>
-  );
-}
-
-/** One stylesheet for every website: saved in each site's theme (block themes), replacing only our own block. */
-function CustomCss() {
-  const KEY = "affiliwriter.css";
-  const DEFAULT_CSS = "em {\n  font-size: 13px;\n}";
-  const [css, setCss] = useState(() => {
-    try { return localStorage.getItem(KEY) ?? DEFAULT_CSS; } catch { return DEFAULT_CSS; }
-  });
-  const [busy, setBusy] = useState(false);
-  const [res, setRes] = useState<Awaited<ReturnType<typeof pushCss>> | null>(null);
-  async function apply() {
-    setBusy(true);
-    setRes(null);
-    try { localStorage.setItem(KEY, css); } catch { /* optional */ }
-    setRes(await pushCss(css));
-    setBusy(false);
-  }
-  const failed = res?.results.filter((r) => !r.ok) ?? [];
-  return (
-    <Card className="space-y-4 p-5">
-      <div>
-        <h2 className="font-semibold">Custom CSS for all websites</h2>
-        <p className="mt-0.5 text-sm text-slate-500">
-          Saved in every website's theme (Additional CSS) in one click. Only this block is replaced; CSS you added by
-          hand stays. Leave it empty and apply to remove it. Works on block themes; other sites are listed below.
-        </p>
-      </div>
-      <Textarea rows={6} className="font-mono text-sm" value={css} onChange={(e) => setCss(e.target.value)} />
-      <Button type="button" onClick={apply} disabled={busy}>{busy ? "Applying…" : "Apply to all websites"}</Button>
-      {res && <Notice kind={res.ok ? "ok" : "error"}>{res.text}</Notice>}
-      {failed.length > 0 && (
-        <ul className="max-h-48 space-y-1 overflow-auto text-sm text-slate-600">
-          {failed.map((f) => <li key={f.name}><b>{f.name}</b>: {f.note}</li>)}
-        </ul>
-      )}
     </Card>
   );
 }

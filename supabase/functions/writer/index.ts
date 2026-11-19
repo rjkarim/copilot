@@ -173,24 +173,6 @@ Deno.serve(async (req) => {
       ? { ok: false, error: `${failed.length} of ${results.length} websites could not be changed: ${failed[0]}` }
       : { ok: true, websites: results.length, seconds });
   }
-  // Site-wide custom CSS for every website of this user (Settings > Custom CSS).
-  if (body.action === "push_css") {
-    const css = String(body.css ?? "").slice(0, 20000).trim();
-    const { data: sites } = await admin.from("websites").select("*").eq("user_id", auth.user.id);
-    const results: { name: string; ok: boolean; note: string }[] = [];
-    const queue = [...(sites ?? [])];
-    await Promise.all(Array.from({ length: 4 }, async () => {
-      for (let s = queue.shift(); s; s = queue.shift()) {
-        try {
-          await wpPushCss(s, css);
-          results.push({ name: s.name, ok: true, note: "" });
-        } catch (e) {
-          results.push({ name: s.name, ok: false, note: String(e instanceof Error ? e.message : e).slice(0, 200) });
-        }
-      }
-    }));
-    return json({ ok: true, results });
-  }
   if (body.action === "categories") {
     const { data: site } = await admin.from("websites").select("*")
       .eq("id", body.website_id).eq("user_id", auth.user.id).maybeSingle();
@@ -1058,35 +1040,6 @@ async function wpFetch(url: string, init: RequestInit = {}): Promise<Response> {
     target = new URL(next, target).toString();
   }
   throw new Error("WordPress redirected too many times. Check the website URL (https:// and www).");
-}
-
-/**
- * Saves custom CSS in the active theme's global styles (Site Editor > Styles > Additional CSS).
- * Only our own marked block is replaced, so CSS someone added by hand stays. Classic (non-block)
- * themes have no REST access to their CSS, so those sites report an error to add it by hand.
- */
-async function wpPushCss(site: Row, css: string) {
-  const { api, headers } = wp(site);
-  const themesRes = await wpFetch(`${api}/themes?status=active`, { headers });
-  if (!themesRes.ok) throw new Error(await wpError(themesRes));
-  const themes = await themesRes.json().catch(() => null);
-  const href: string | undefined = Array.isArray(themes)
-    ? themes[0]?._links?.["https://api.w.org/user-global-styles"]?.[0]?.href
-    : undefined;
-  if (!href) throw new Error("This site's theme is not a block theme, so its CSS cannot be set remotely. Paste it under Appearance > Customize > Additional CSS.");
-  const cur = await wpFetch(href + (href.includes("?") ? "&" : "?") + "context=edit", { headers });
-  if (!cur.ok) throw new Error(await wpError(cur));
-  const data = await cur.json().catch(() => null);
-  const styles = (data?.styles && typeof data.styles === "object") ? data.styles : {};
-  const START = "/* affiliwriter:start */", END = "/* affiliwriter:end */";
-  const old = String(styles.css ?? "");
-  const block = css ? `${START}\n${css}\n${END}` : "";
-  const a = old.indexOf(START), b = old.indexOf(END);
-  const next = a >= 0 && b > a
-    ? (old.slice(0, a) + block + old.slice(b + END.length)).trim()
-    : [old.trim(), block].filter(Boolean).join("\n\n");
-  const res = await wpFetch(href, { method: "POST", headers, body: JSON.stringify({ styles: { ...styles, css: next } }) });
-  if (!res.ok) throw new Error(await wpError(res));
 }
 
 async function wpError(res: Response): Promise<string> {

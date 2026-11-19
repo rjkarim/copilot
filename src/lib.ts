@@ -235,16 +235,6 @@ export async function saveSleepForAll(lane: "new" | "update", seconds: number): 
   };
 }
 
-/** Pushes custom CSS to every website (block themes). Returns one result per website. */
-export async function pushCss(css: string): Promise<{ ok: boolean; text: string; results: { name: string; ok: boolean; note: string }[] }> {
-  const { data, error } = await supabase.functions.invoke("writer", { body: { action: "push_css", css } });
-  if (error) return { ok: false, text: await writerError(error), results: [] };
-  if (!data?.ok) return { ok: false, text: data?.error ?? "Could not push the CSS.", results: [] };
-  const results = data.results as { name: string; ok: boolean; note: string }[];
-  const done = results.filter((r) => r.ok).length;
-  return { ok: done > 0 || results.length === 0, text: `Saved on ${done} of ${results.length} websites.`, results };
-}
-
 export function sleepLabel(seconds: number) {
   if (seconds < 60) return `${seconds}s`;
   if (seconds % 3600 === 0) return `${seconds / 3600}h`;
