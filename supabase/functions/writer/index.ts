@@ -977,7 +977,7 @@ async function writeReview(
     p.rating ? `${p.rating.toFixed(1)}/5${p.reviews ? ` (${p.reviews.toLocaleString("en-US")})` : ""}` : "";
   const anyRating = picks.some(({ p }) => p.rating);
 
-  let html = `<p><em>As an Amazon Associate I earn from qualifying purchases.</em></p>\n` + introHtml(intro);
+  let html = `<p style="font-size:13px"><em>As an Amazon Associate I earn from qualifying purchases.</em></p>\n` + introHtml(intro);
 
   html += `<h2>${esc(String(plan.glance_heading || `Our Top ${picks.length} Picks at a Glance`))}</h2>\n` +
     `<table><tr><th></th><th>${esc(L.product)}</th>${anyRating ? `<th>${esc(L.rating)}</th>` : ""}<th></th></tr>` +
