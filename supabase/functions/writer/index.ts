@@ -979,12 +979,10 @@ async function writeReview(
   const [intro, closing, ...reviews] = await inParallel<Row>([
     () => writeIntro(cfg, context, [
       "Describe the buyer's problem and who this guide is for, using the keyword naturally.",
-      "Explain the three or four factors that matter most when choosing this kind of product, and why each one matters.",
-      "Point out common buying mistakes and what they cost the buyer.",
+      "Name the two or three factors that matter most when choosing this kind of product, and the most common buying mistake.",
       "Explain how these picks were chosen: from Amazon listings, their features and specifications, and customer ratings where available. Do not claim hands-on testing.",
-      `Preview the top pick (${picks[0].r.name ?? picks[0].p.title}) in one or two sentences and why it leads the list.`,
-      "Tell the reader what the guide covers next: the comparison table, the detailed reviews and the buying guide, in a natural sentence.",
-    ], REVIEW_RULES),
+      `Preview the top pick (${picks[0].r.name ?? picks[0].p.title}) and why it leads the list, then say in a natural sentence what the guide covers next.`,
+    ], REVIEW_RULES, [35, 50]),
     () => askOpenAI(cfg, STYLE + REVIEW_RULES,
       context + `Write the closing parts. The buying guide explains how to choose in general; it does not review the picks.\n` +
         `JSON shape: {"buying_guide_html": string (300-400 words; 3-4 h3 subsections on the factors that decide a good purchase), ` +
