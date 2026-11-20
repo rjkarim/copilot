@@ -801,11 +801,13 @@ const plain = (html: unknown) => String(html ?? "").replace(/<\/?(strong|b|em|i)
  * reliably reaches about 300-400 words (as one field of a bigger request the AI
  * kept it near 150). Runs at the same time as the other sections.
  */
-async function writeIntro(cfg: Row, context: string, points: string[], rules = ""): Promise<Row> {
+async function writeIntro(cfg: Row, context: string, points: string[], rules = "", words = [55, 75]): Promise<Row> {
+  const [lo, hi] = words;
+  const sentences = hi <= 55 ? "2-3" : "3-4";
   return await askOpenAI(cfg, STYLE + rules,
     context + `Write the introduction of this article: exactly ${points.length} paragraphs, in this order:\n` +
       points.map((p, i) => `${i + 1}. ${p}`).join("\n") +
-      `\nEach paragraph is plain text of 55-75 words (3-4 sentences). Together they make about ${points.length * 60} words. ` +
+      `\nEach paragraph is plain text of ${lo}-${hi} words (${sentences} sentences). Together they make about ${points.length * Math.round((lo + hi) / 2)} words. ` +
       `Use the exact keyword once in the first paragraph. No headings.\n` +
       `JSON shape: {"paragraphs": string[] (exactly ${points.length})}`);
 }
@@ -821,6 +823,37 @@ function faqHtml(heading: unknown, faq: unknown) {
 }
 const FAQ_SHAPE = `"faq": [{"q": string, "a": string (30-50 words, direct answer first)}] (5 real questions people ask), `;
 
+// Informative articles mix formats so they are easy to scan: short paragraphs,
+// bullet lists, numbered steps and comparison tables. Reviews keep their own layout.
+const INFO_RULES =
+  "\nInformative article rules: keep paragraphs short, 2-3 sentences and at most 50 words each. " +
+  "Besides p, h3, ul, ol and li you may use table, thead, tbody, tr, th and td for a table (no attributes or styles).";
+const SECTION_FORMATS: Record<string, string> = {
+  table: "one short lead-in paragraph, then a table (3-6 rows, 2-4 columns, header row in thead) of real, useful facts, then one short paragraph on what it means",
+  bullets: "one short lead-in paragraph, then a bullet list (ul) of 4-6 points, each one or two sentences, then one short paragraph",
+  steps: "one short lead-in paragraph, then numbered steps (ol) of 4-7 clear actions in order, then one short tip paragraph",
+  mixed: "2 short paragraphs, then an h3 followed by a short bullet list (ul) of 3-5 points",
+  paragraphs: "3-4 short paragraphs of 2-3 sentences each, with one h3 subheading if it helps",
+};
+/** The format of each section, making sure an article has a table, a bullet list and numbered steps. */
+function sectionFormats(outline: Row[]): string[] {
+  const picked = outline.map((s) => {
+    const f = String(s.format ?? "").toLowerCase();
+    return f in SECTION_FORMATS ? f : "paragraphs";
+  });
+  for (const f of ["table", "bullets", "steps"]) {
+    if (picked.includes(f)) continue;
+    // Convert a plain section (never the first one, which sets the scene).
+    let i = picked.findIndex((x, n) => n > 0 && x === "paragraphs");
+    if (i < 0) i = picked.findIndex((x, n) => n > 0 && x === "mixed");
+    if (i >= 0) picked[i] = f;
+  }
+  return picked;
+}
+/** Wraps tables the way the WordPress block editor does, so themes style them. */
+const wpTables = (html: string) =>
+  html.replace(/<table(\s[^>]*)?>/gi, '<figure class="wp-block-table"><table>').replace(/<\/table>/gi, "</table></figure>");
+
 async function writeInformative(cfg: Row, site: Row, keyword: string, withFaq: boolean, report: Report): Promise<Draft> {
   await report("Planning article", 35);
   const plan = await askOpenAI(
@@ -830,13 +863,17 @@ async function writeInformative(cfg: Row, site: Row, keyword: string, withFaq: b
       `Cover what a searcher of this keyword wants to know, in the order they need it.\n` +
       `JSON shape: {"title": string (creative and specific, 50-60 characters including spaces, keyword near the start, every word capitalised, abbreviations in capitals such as UV, RV, LED), ` +
       `"meta_description": string (140-155 characters, includes the keyword), ` +
-      `"outline": [{"heading": string, "brief": string (max 20 words: what the section covers)}] (5-6 sections, no FAQ or conclusion), ` +
+      `"outline": [{"heading": string, "brief": string (max 20 words: what the section covers), ` +
+      `"format": "table" | "bullets" | "steps" | "mixed" | "paragraphs" (a table for comparisons, sizes, costs or specs; ` +
+      `steps for a how-to; bullets for tips, signs, causes, pros and cons)}] ` +
+      `(5-6 sections, no FAQ or conclusion; use at least one table, one bullets and one steps section), ` +
       (withFaq ? `"faq_heading": string, ` : "") + `"conclusion_heading": string}`,
   );
   if (!plan.title || !Array.isArray(plan.outline) || plan.outline.length === 0) {
     throw new Error("The AI returned an incomplete article plan. Retry the keyword.");
   }
   const outline: Row[] = plan.outline.slice(0, 6);
+  const formats = sectionFormats(outline);
   const context = `Article "${plan.title}", keyword "${keyword}", language ${site.language}. ` +
     `Sections: ${outline.map((s) => s.heading).join(" | ")}\n`;
 
@@ -848,17 +885,18 @@ async function writeInformative(cfg: Row, site: Row, keyword: string, withFaq: b
       "Describe the most common mistake or misunderstanding about this topic and the better approach.",
       "Give one practical tip or concrete fact the reader can use right away.",
       "Tell the reader what the following sections cover, in a natural sentence, not a list.",
-    ]),
-    () => askOpenAI(cfg, STYLE,
+    ], INFO_RULES, [35, 50]),
+    () => askOpenAI(cfg, STYLE + INFO_RULES,
       context + `Write the closing parts.\nJSON shape: {` + (withFaq ? FAQ_SHAPE : "") +
-        `"conclusion_html": string (60-90 words: the key takeaway and a next step)}`),
-    ...outline.map((s) => () => askOpenAI(cfg, STYLE,
+        `"conclusion_html": string (60-90 words in 2 short paragraphs: the key takeaway and a next step)}`),
+    ...outline.map((s, i) => () => askOpenAI(cfg, STYLE + INFO_RULES,
       context + `Write only the section "${s.heading}" (${s.brief}). Do not repeat the heading or cover other sections.\n` +
-        `JSON shape: {"html": string (130-200 words; use h3 or a list where it helps)}`)),
+        `Format: ${SECTION_FORMATS[formats[i]]}.\n` +
+        `JSON shape: {"html": string (130-220 words of HTML)}`)),
   ], report);
 
   let html = introHtml(intro);
-  outline.forEach((s, i) => { html += `<h2>${esc(String(s.heading ?? ""))}</h2>\n${plain(sections[i]?.html)}\n`; });
+  outline.forEach((s, i) => { html += `<h2>${esc(String(s.heading ?? ""))}</h2>\n${wpTables(plain(sections[i]?.html))}\n`; });
   if (withFaq) html += faqHtml(plan.faq_heading, closing.faq);
   html += `<h2>${esc(String(plan.conclusion_heading || "Final Thoughts"))}</h2>\n${plain(closing.conclusion_html)}`;
   return { title: String(plan.title), html, excerpt: String(plan.meta_description ?? "") };
