@@ -4,7 +4,7 @@ import {
 } from "../lib";
 import { Button, Card, ConfirmDialog, Field, Input, Notice, Select, type ConfirmRequest } from "../ui";
 
-type Saved = { openai_model: string; openai_base_url: string; has_openai_key: boolean };
+type Saved = { openai_model: string; openai_base_url: string; has_openai_key: boolean; openai_key_hint: string | null };
 const DEFAULT_BASE = "https://api.openai.com/v1";
 
 export default function Settings() {
@@ -31,7 +31,7 @@ export default function Settings() {
 
   async function load() {
     const { data, error } = await supabase.from("settings")
-      .select("openai_model,openai_base_url,has_openai_key").maybeSingle();
+      .select("openai_model,openai_base_url,has_openai_key,openai_key_hint").maybeSingle();
     if (error || !data) {
       const text = error?.message.includes("openai_base_url")
         ? "Database update needed: run supabase/migrations/002_ai_base_url.sql in the Supabase SQL Editor, then reload."
@@ -79,7 +79,9 @@ export default function Settings() {
         <div className="flex items-center justify-between">
           <h2 className="font-semibold">AI article writer</h2>
           {saved?.has_openai_key ? (
-            <span className="text-xs font-medium text-emerald-600">● Saved</span>
+            <span className="text-xs font-medium text-emerald-600">
+              ● Saved{saved.openai_key_hint ? ` · key ends in ${saved.openai_key_hint}` : ""}
+            </span>
           ) : (
             <span className="text-xs font-medium text-amber-600">● Not set</span>
           )}
@@ -89,7 +91,7 @@ export default function Settings() {
         </Field>
         <Field label="API key" hint="The key from the provider above">
           <Input type="password" value={openaiKey} onChange={(e) => setOpenaiKey(e.target.value)} autoComplete="off"
-            placeholder={saved?.has_openai_key ? "•••••••• (saved)" : "sk-..."} />
+            placeholder={saved?.has_openai_key ? `•••••••• ${saved.openai_key_hint ?? ""} (saved)` : "sk-..."} />
         </Field>
         <Field label="Model" hint="The exact model name your provider uses, e.g. gpt-4o-mini or openai/gpt-6-luna">
           <Input value={model} onChange={(e) => setModel(e.target.value)} />
