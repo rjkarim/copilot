@@ -298,9 +298,19 @@ async function writeArticle(id: string) {
     await syncCounts(site);
   } catch (e) {
     const message = String(e instanceof Error ? e.message : e).slice(0, 600);
-    if (!isUpdate && message.startsWith("Amazon returned no products")) {
+    if (message.startsWith("Amazon returned no products")) {
       // Nothing to review for this keyword: remove it instead of listing it under Failed.
-      await admin.from("articles").delete().eq("id", id).eq("status", "writing").eq("attempts", a.attempts);
+      const { data: gone } = await admin.from("articles").delete()
+        .eq("id", id).eq("status", "writing").eq("attempts", a.attempts).select("id");
+      if (isUpdate && gone?.length && a.wp_post_id) {
+        // An old post with no Amazon products is left exactly as it is. Its id is remembered
+        // so the updater does not pick the same post again.
+        const { data: cur } = await admin.from("websites").select("update_skipped").eq("id", site.id).maybeSingle();
+        const skipped: number[] = Array.isArray(cur?.update_skipped) ? cur.update_skipped.map(Number) : [];
+        if (!skipped.includes(Number(a.wp_post_id))) {
+          await admin.from("websites").update({ update_skipped: [...skipped, Number(a.wp_post_id)] }).eq("id", site.id);
+        }
+      }
       waitSeconds = 0;
     } else if (RETRYABLE.test(message) && a.attempts < MAX_ATTEMPTS) {
       // AI errors and timeouts are usually temporary: put it back in the queue and try again in 30 seconds.
@@ -544,6 +554,8 @@ async function wpNextOldPost(site: Row): Promise<{ post: Row; remaining: number 
     const { data: seen } = await admin.from("articles").select("wp_post_id")
       .eq("website_id", site.id).in("wp_post_id", posts.map((p) => p.id));
     const done = new Set((seen ?? []).map((r) => Number(r.wp_post_id)));
+    // Posts skipped because Amazon had no products for them are not tried again.
+    for (const id of Array.isArray(site.update_skipped) ? site.update_skipped : []) done.add(Number(id));
     const post = posts.find((p) => !done.has(Number(p.id)));
     if (post) return { post, remaining: remaining - posts.indexOf(post) };
     if (posts.length < 20) return null;
