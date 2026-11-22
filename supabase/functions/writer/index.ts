@@ -982,7 +982,15 @@ async function writeReview(
     const p = byAsin.get(String(r.asin));
     if (p && !picks.some((x) => x.p.asin === p.asin) && picks.length < count) picks.push({ p, r });
   }
-  if (picks.length === 0) throw new Error("The AI did not choose any of the Amazon products. Retry the keyword.");
+  if (picks.length === 0) {
+    // The AI named product ids that are not in the Amazon results. Instead of failing, use the
+    // top results in Amazon's own order, with their listed names.
+    for (const p of products) {
+      if (picks.length >= count) break;
+      picks.push({ p, r: { asin: p.asin, name: p.title.slice(0, 65), best_for: "", angle: "" } });
+    }
+  }
+  if (picks.length === 0) throw new Error("Amazon returned no products for \"" + keyword + "\".");
   const name = (x: { p: Product; r: Row }) => esc(String(x.r.name ?? x.p.title).slice(0, 90));
   const context = `Article "${plan.title}", keyword "${keyword}", language ${site.language}. Picks: ` +
     picks.map((x, i) => `${i + 1}) ${x.r.name ?? x.p.title} - ${x.r.best_for ?? ""}`).join("; ") + "\n";
