@@ -244,6 +244,8 @@ async function applySleep(siteId: string, kind: "new" | "update", seconds: numbe
 const RETRYABLE = /^(AI provider error|The AI |Could not reach the AI|Timed out)|error sending request|connection closed|connection reset|network error|fetch failed/i;
 // First try plus three automatic retries; after that the keyword is listed under Failed.
 const MAX_ATTEMPTS = 4;
+// The AI account has run out of quota or credit (the provider says so in its error text).
+const PROVIDER_LIMIT = /^AI provider error.*(usage limit|limit has been reached|quota|insufficient (credit|balance|funds)|out of credit|billing|exceeded your current)/i;
 
 async function writeArticle(id: string) {
   const { data: a } = await admin.from("articles").select("*").eq("id", id).maybeSingle();
@@ -341,6 +343,15 @@ async function writeArticle(id: string) {
         }
       }
       waitSeconds = 0;
+    } else if (PROVIDER_LIMIT.test(message)) {
+      // The AI account itself is out of quota or credit. Retrying the same article now is pointless and
+      // marking it Failed would make the updater skip posts one after another. Keep it waiting instead,
+      // without using up an attempt, and look again in 30 minutes.
+      await set({
+        status: "queued", step: null, progress: 0, finished_at: null, attempts: Math.max(0, a.attempts - 1), ...unpublished,
+        error: `AI provider limit reached. Waiting and retrying automatically every 30 minutes. ${message}`.slice(0, 600),
+      });
+      waitSeconds = 1800;
     } else if (RETRYABLE.test(message) && a.attempts < MAX_ATTEMPTS) {
       // AI errors and timeouts are usually temporary: put it back in the queue and try again in 30 seconds.
       await set({

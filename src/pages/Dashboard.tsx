@@ -19,8 +19,16 @@ export default function Dashboard() {
   const [form, setForm] = useState<{ site?: Site } | null>(null);
   const [syncing, setSyncing] = useState("");
   const [ask, setAsk] = useState<ConfirmRequest | null>(null);
+  // Set while the AI provider refuses requests because its quota or credit has run out.
+  const [aiLimit, setAiLimit] = useState<{ count: number; message: string } | null>(null);
 
   async function load() {
+    supabase.from("articles").select("error", { count: "exact" })
+      .eq("status", "queued").like("error", "AI provider limit reached%").limit(1)
+      .then(({ data, count }) => {
+        const text = String(data?.[0]?.error ?? "").replace(/^AI provider limit reached\.[^.]*\.\s*/, "");
+        setAiLimit(count ? { count, message: text } : null);
+      });
     const { data, error } = await supabase.from("website_overview").select("*").order("created_at");
     if (error) setError(`${error.message} — has the database setup SQL been run? See README.md.`);
     else if (data.length > 0 && data[0].has_amazon_keys === undefined) {
@@ -135,6 +143,13 @@ export default function Dashboard() {
       </div>
 
       {error && <Notice kind="error">{error}</Notice>}
+      {aiLimit && (
+        <Notice kind="error">
+          <b>The AI provider has stopped answering.</b> {aiLimit.count} article{aiLimit.count === 1 ? " is" : "s are"} waiting and
+          will retry automatically every 30 minutes, so nothing is lost or marked Failed. Provider message: {aiLimit.message}
+          {" "}Top up or upgrade the plan with your provider, or change the provider in Settings.
+        </Notice>
+      )}
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         {stats.map((s) => (
