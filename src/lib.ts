@@ -69,12 +69,7 @@ export const AMAZON_VERSIONS = [
 
 export async function loadAmazonAccounts(): Promise<{ accounts: AmazonAccount[]; error: string | null }> {
   const { data, error } = await supabase.from("amazon_accounts").select("id,name,version").order("created_at");
-  if (error) {
-    return {
-      accounts: [],
-      error: "Database update needed: run supabase/migrations/005_amazon_accounts_and_faq.sql in the Supabase SQL Editor, then reload.",
-    };
-  }
+  if (error) return { accounts: [], error: error.message };
   return { accounts: data as AmazonAccount[], error: null };
 }
 
@@ -95,15 +90,6 @@ export async function addAmazonAccount(a: {
 }
 
 export type Category = { id: number; name: string };
-
-/** Reads the website's categories live from WordPress (through the background function). */
-export async function fetchCategories(id: string): Promise<{ categories: Category[]; error: string | null }> {
-  const { data, error } = await supabase.functions.invoke("writer", {
-    body: { action: "categories", website_id: id },
-  });
-  if (error) return { categories: [], error: await writerError(error) };
-  return data?.ok ? { categories: data.categories, error: null } : { categories: [], error: data?.error ?? "Could not load categories." };
-}
 
 export type Article = {
   id: string;
@@ -173,13 +159,28 @@ export async function writerError(error: unknown): Promise<string> {
   return "Could not reach the background writer. Check your internet connection and that the 'writer' function is deployed.";
 }
 
-/** Asks the background function to test the WordPress login and refresh post counts. */
+type WriterReply = { ok: true; data: any } | { ok: false; error: string };
+
+/**
+ * Calls the background writer function. Returns its answer when it reports ok,
+ * otherwise the reason in plain words (`fallback` when it gives none).
+ */
+export async function callWriter(body: Record<string, unknown>, fallback: string): Promise<WriterReply> {
+  const { data, error } = await supabase.functions.invoke("writer", { body });
+  if (error) return { ok: false, error: await writerError(error) };
+  return data?.ok ? { ok: true, data } : { ok: false, error: data?.error ?? fallback };
+}
+
+/** Reads the website's categories live from WordPress. */
+export async function fetchCategories(id: string): Promise<{ categories: Category[]; error: string | null }> {
+  const r = await callWriter({ action: "categories", website_id: id }, "Could not load categories.");
+  return r.ok ? { categories: r.data.categories, error: null } : { categories: [], error: r.error };
+}
+
+/** Tests the WordPress login and refreshes the post counts. Returns an error message or null. */
 export async function syncSite(id: string): Promise<string | null> {
-  const { data, error } = await supabase.functions.invoke("writer", {
-    body: { action: "sync", website_id: id },
-  });
-  if (error) return writerError(error);
-  return data?.ok ? null : (data?.error ?? "Sync failed.");
+  const r = await callWriter({ action: "sync", website_id: id }, "Sync failed.");
+  return r.ok ? null : r.error;
 }
 
 /** Tests WordPress, Amazon or the AI provider with the values typed in a form (nothing is saved). */
@@ -188,20 +189,31 @@ export async function testConnection(
   websiteId: string | undefined,
   fields: Record<string, string>,
 ): Promise<{ ok: boolean; text: string }> {
-  const { data, error } = await supabase.functions.invoke("writer", {
-    body: { action: `test_${kind}`, website_id: websiteId, fields },
-  });
-  if (error) return { ok: false, text: await writerError(error) };
-  return data?.ok ? { ok: true, text: data.message } : { ok: false, text: data?.error ?? "Test failed." };
+  const r = await callWriter({ action: `test_${kind}`, website_id: websiteId, fields }, "Test failed.");
+  return r.ok ? { ok: true, text: r.data.message } : { ok: false, text: r.error };
+}
+
+/** An article's text: unpublished text from the app, a published post read live from its website. */
+export async function previewArticle(id: string): Promise<{ title?: string; html?: string; error?: string }> {
+  const r = await callWriter({ action: "preview", article_id: id }, "Could not load the post.");
+  return r.ok ? { title: r.data.title, html: r.data.html } : { error: r.error };
 }
 
 /** Saves a website's sleep time; it takes effect immediately. Returns an error message or null. */
 export async function saveSleep(websiteId: string, lane: "new" | "update", seconds: number): Promise<string | null> {
-  const { data, error } = await supabase.functions.invoke("writer", {
-    body: { action: "set_sleep", website_id: websiteId, lane, seconds },
-  });
-  if (error) return writerError(error);
-  return data?.ok ? null : (data?.error ?? "Could not save the sleep time.");
+  const r = await callWriter({ action: "set_sleep", website_id: websiteId, lane, seconds }, "Could not save the sleep time.");
+  return r.ok ? null : r.error;
+}
+
+/** Sets the sleep time of every website at once; effective immediately. */
+export async function saveSleepForAll(lane: "new" | "update", seconds: number): Promise<{ ok: boolean; text: string }> {
+  const r = await callWriter({ action: "set_sleep_all", lane, seconds }, "Could not change the sleep time.");
+  if (!r.ok) return { ok: false, text: r.error };
+  const n = r.data.websites;
+  return {
+    ok: true,
+    text: `Done. ${n} website${n === 1 ? "" : "s"} now sleep ${sleepLabel(r.data.seconds)} after each ${lane === "new" ? "new article" : "old-post update"}, effective from now.`,
+  };
 }
 
 /**
@@ -212,35 +224,19 @@ export async function saveSleep(websiteId: string, lane: "new" | "update", secon
 export async function clearHistoryForAll(mode: "text" | "all", onProgress: (total: number) => void): Promise<string | null> {
   let total = 0;
   for (let round = 0; round < 500; round++) {
-    const { data, error } = await supabase.functions.invoke("writer", { body: { action: "clear_history", mode } });
-    if (error) return writerError(error);
-    if (!data?.ok) return data?.error ?? "Could not clear the history.";
-    total += data.removed;
+    const r = await callWriter({ action: "clear_history", mode }, "Could not clear the history.");
+    if (!r.ok) return r.error;
+    total += r.data.removed;
     onProgress(total);
-    if (!data.more) return null;
+    if (!r.data.more) return null;
   }
   return "Stopped after many rounds; click the button again to continue.";
 }
 
-/** Sets the sleep time of every website at once; effective immediately. */
-export async function saveSleepForAll(lane: "new" | "update", seconds: number): Promise<{ ok: boolean; text: string }> {
-  const { data, error } = await supabase.functions.invoke("writer", {
-    body: { action: "set_sleep_all", lane, seconds },
-  });
-  if (error) return { ok: false, text: await writerError(error) };
-  if (!data?.ok) return { ok: false, text: data?.error ?? "Could not change the sleep time." };
-  return {
-    ok: true,
-    text: `Done. ${data.websites} website${data.websites === 1 ? "" : "s"} now sleep ${sleepLabel(data.seconds)} after each ${lane === "new" ? "new article" : "old-post update"}, effective from now.`,
-  };
-}
-
 /** Retry after the AI provider's limit was reached: checks the provider answers, then resumes all writing. */
 export async function resumeAi(): Promise<{ ok: boolean; text: string }> {
-  const { data, error } = await supabase.functions.invoke("writer", { body: { action: "resume_ai" } });
-  if (error) return { ok: false, text: await writerError(error) };
-  if (!data?.ok) return { ok: false, text: data?.error ?? "The AI provider still does not answer." };
-  return { ok: true, text: "Writing has resumed." };
+  const r = await callWriter({ action: "resume_ai" }, "The AI provider still does not answer.");
+  return r.ok ? { ok: true, text: "Writing has resumed." } : { ok: false, text: r.error };
 }
 
 export function sleepLabel(seconds: number) {

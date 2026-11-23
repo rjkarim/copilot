@@ -33,10 +33,7 @@ export default function Settings() {
     const { data, error } = await supabase.from("settings")
       .select("openai_model,openai_base_url,has_openai_key,openai_key_hint").maybeSingle();
     if (error || !data) {
-      const text = error?.message.includes("openai_base_url")
-        ? "Database update needed: run supabase/migrations/002_ai_base_url.sql in the Supabase SQL Editor, then reload."
-        : (error?.message ?? "Settings row not found. Run the database setup SQL (README.md).");
-      return setMsg({ kind: "error", text });
+      return setMsg({ kind: "error", text: error?.message ?? "Settings row not found. Run the database setup SQL (README.md)." });
     }
     setSaved(data);
     setModel(data.openai_model);
@@ -116,77 +113,6 @@ export default function Settings() {
   );
 }
 
-/** One "products per review article" number for every website, for new articles and old-post updates. */
-function ProductsForAll() {
-  const session = useSession();
-  const [values, setValues] = useState({ product_count: "5", update_product_count: "5" });
-  const [busy, setBusy] = useState<string | null>(null);
-  const [msg, setMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
-  type Key = keyof typeof values;
-
-  // Start the boxes at the number most websites use now.
-  useEffect(() => {
-    supabase.from("website_overview").select("product_count,update_product_count").then(({ data }) => {
-      if (!data?.length) return;
-      const common = (key: Key) => {
-        const counts = new Map<number, number>();
-        for (const row of data) if (row[key] != null) counts.set(row[key], (counts.get(row[key]) ?? 0) + 1);
-        return String([...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 5);
-      };
-      setValues({ product_count: common("product_count"), update_product_count: common("update_product_count") });
-    });
-  }, []);
-
-  async function apply(key: Key) {
-    const count = Math.min(10, Math.max(1, Math.round(Number(values[key])) || 5));
-    setBusy(key);
-    setMsg(null);
-    const { error, count: changed } = await supabase.from("websites")
-      .update({ [key]: count }, { count: "exact" }).eq("user_id", session.user.id);
-    setBusy(null);
-    setValues({ ...values, [key]: String(count) });
-    setMsg(
-      error
-        ? {
-            kind: "error",
-            text: error.message.includes("product_count")
-              ? "Database update needed: run supabase/migrations/009_product_count_per_website.sql in the Supabase SQL Editor, then try again."
-              : error.message,
-          }
-        : {
-            kind: "ok",
-            text: `Done. ${changed ?? "All"} websites now review ${count} products per ${key === "product_count" ? "new article" : "updated money post"}, starting with the next article.`,
-          },
-    );
-  }
-  const row = (key: Key, label: string) => (
-    <div className="flex flex-wrap items-end gap-2">
-      <label className="block">
-        <span className="mb-1 block text-sm font-medium text-slate-700">{label}</span>
-        <Input type="number" min={1} max={10} className="w-44" value={values[key]}
-          onChange={(e) => setValues({ ...values, [key]: e.target.value })} />
-      </label>
-      <Button type="button" onClick={() => apply(key)} disabled={busy !== null}>
-        {busy === key ? "Applying…" : "Apply to all websites"}
-      </Button>
-    </div>
-  );
-  return (
-    <Card className="space-y-4 p-5">
-      <div>
-        <h2 className="font-semibold">Products to review per article, for all websites</h2>
-        <p className="mt-0.5 text-sm text-slate-500">
-          Changes every website in one click (1-10). It applies to all keywords still waiting, starting with the next
-          article. A single website can still be given its own number on its page afterwards.
-        </p>
-      </div>
-      {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
-      {row("product_count", "In each new review article")}
-      {row("update_product_count", "In each updated money post")}
-    </Card>
-  );
-}
-
 /** Clears generated content of all websites from the app's database to free storage. */
 function FreeStorage() {
   const [ask, setAsk] = useState<ConfirmRequest | null>(null);
@@ -225,8 +151,8 @@ function FreeStorage() {
       <div>
         <h2 className="font-semibold">Free up database storage</h2>
         <p className="mt-0.5 text-sm text-slate-500">
-          The app keeps a copy of every article it writes, which is what fills your Supabase database. Both buttons
-          work on all websites at once and never change anything on the websites themselves.
+          The app keeps a small record of every article for the lists and Statistics; article text is only kept
+          until it is published. Both buttons work on all websites at once and never change anything on the websites.
         </p>
       </div>
       {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
@@ -241,7 +167,7 @@ function FreeStorage() {
         <div className="max-w-xs space-y-2">
           <Button type="button" variant="ghost" onClick={() => run("text")} disabled={progress !== null}>Delete saved text only</Button>
           <p className="text-xs text-slate-500">
-            Keeps the article lists and statistics, deletes only the stored text. Frees almost as much space.
+            Keeps the article lists and statistics and deletes any article text still stored.
           </p>
         </div>
       </div>
@@ -250,57 +176,106 @@ function FreeStorage() {
   );
 }
 
-/** One sleep time for every website, separately for new articles and old-post updates. */
-function SleepForAll() {
-  const [values, setValues] = useState({ new: "60", update: "60" });
-  const [busy, setBusy] = useState<"new" | "update" | null>(null);
+type ForAllField = { key: "sleep_seconds" | "update_sleep_seconds" | "product_count" | "update_product_count"; label: string };
+
+/**
+ * One number for every website at once, with an "Apply to all websites" button per
+ * row. The boxes start at the value most websites use now, so you can see what is in use.
+ */
+function ForAllCard({ title, description, fields, min, max, fallback, apply }: {
+  title: string; description: string; fields: ForAllField[]; min: number; max?: number; fallback: number;
+  apply: (key: ForAllField["key"], value: number) => Promise<{ ok: boolean; text: string }>;
+}) {
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries(fields.map((f) => [f.key, String(fallback)])));
+  const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
 
-  // Start the boxes at the most common current value, so you can see what is in use.
   useEffect(() => {
-    supabase.from("website_overview").select("sleep_seconds,update_sleep_seconds").then(({ data }) => {
-      if (!data?.length) return;
-      const common = (key: "sleep_seconds" | "update_sleep_seconds") => {
+    supabase.from("website_overview").select(fields.map((f) => f.key).join(",")).then(({ data }) => {
+      const rows = (data ?? []) as unknown as Record<string, number | null>[];
+      if (!rows.length) return;
+      const common = (key: string) => {
         const counts = new Map<number, number>();
-        for (const row of data) counts.set(row[key], (counts.get(row[key]) ?? 0) + 1);
-        return String([...counts.entries()].sort((a, b) => b[1] - a[1])[0][0] ?? 60);
+        for (const row of rows) if (row[key] != null) counts.set(row[key]!, (counts.get(row[key]!) ?? 0) + 1);
+        return String([...counts.entries()].sort((x, y) => y[1] - x[1])[0]?.[0] ?? fallback);
       };
-      setValues({ new: common("sleep_seconds"), update: common("update_sleep_seconds") });
+      setValues(Object.fromEntries(fields.map((f) => [f.key, common(f.key)])));
     });
+    // The fields of a card never change, so this runs once.
   }, []);
 
-  async function apply(lane: "new" | "update") {
-    setBusy(lane);
+  async function run(key: ForAllField["key"]) {
+    const value = Math.min(max ?? Infinity, Math.max(min, Math.round(Number(values[key])) || fallback));
+    setBusy(key);
     setMsg(null);
-    const res = await saveSleepForAll(lane, Math.max(0, Math.round(Number(values[lane])) || 0));
+    const res = await apply(key, value);
     setBusy(null);
+    setValues((v) => ({ ...v, [key]: String(value) }));
     setMsg({ kind: res.ok ? "ok" : "error", text: res.text });
   }
-  const row = (lane: "new" | "update", label: string) => (
-    <div className="flex flex-wrap items-end gap-2">
-      <label className="block">
-        <span className="mb-1 block text-sm font-medium text-slate-700">{label}</span>
-        <Input type="number" min={0} className="w-44" value={values[lane]}
-          onChange={(e) => setValues({ ...values, [lane]: e.target.value })} />
-      </label>
-      <Button type="button" onClick={() => apply(lane)} disabled={busy !== null}>
-        {busy === lane ? "Applying…" : "Apply to all websites"}
-      </Button>
-    </div>
-  );
   return (
     <Card className="space-y-4 p-5">
       <div>
-        <h2 className="font-semibold">Sleep time for all websites</h2>
-        <p className="mt-0.5 text-sm text-slate-500">
-          Changes every website in one click and takes effect immediately, also while articles are being written. A
-          single website can still be given its own time on its page afterwards.
-        </p>
+        <h2 className="font-semibold">{title}</h2>
+        <p className="mt-0.5 text-sm text-slate-500">{description}</p>
       </div>
       {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
-      {row("new", "After each new article (seconds)")}
-      {row("update", "After each old-post update (seconds)")}
+      {fields.map((f) => (
+        <div key={f.key} className="flex flex-wrap items-end gap-2">
+          <label className="block">
+            <span className="mb-1 block text-sm font-medium text-slate-700">{f.label}</span>
+            <Input type="number" min={min} max={max} className="w-44" value={values[f.key]}
+              onChange={(e) => setValues({ ...values, [f.key]: e.target.value })} />
+          </label>
+          <Button type="button" onClick={() => run(f.key)} disabled={busy !== null}>
+            {busy === f.key ? "Applying…" : "Apply to all websites"}
+          </Button>
+        </div>
+      ))}
     </Card>
+  );
+}
+
+/** One sleep time for every website, separately for new articles and old-post updates. */
+function SleepForAll() {
+  return (
+    <ForAllCard
+      title="Sleep time for all websites"
+      description="Changes every website in one click and takes effect immediately, also while articles are being written. A single website can still be given its own time on its page afterwards."
+      fields={[
+        { key: "sleep_seconds", label: "After each new article (seconds)" },
+        { key: "update_sleep_seconds", label: "After each old-post update (seconds)" },
+      ]}
+      min={0} fallback={60}
+      apply={(key, seconds) => saveSleepForAll(key === "sleep_seconds" ? "new" : "update", seconds)}
+    />
+  );
+}
+
+/** One "products per review article" number for every website, for new articles and old-post updates. */
+function ProductsForAll() {
+  const session = useSession();
+  return (
+    <ForAllCard
+      title="Products to review per article, for all websites"
+      description="Changes every website in one click (1-10). It applies to all keywords still waiting, starting with the next article. A single website can still be given its own number on its page afterwards."
+      fields={[
+        { key: "product_count", label: "In each new review article" },
+        { key: "update_product_count", label: "In each updated money post" },
+      ]}
+      min={1} max={10} fallback={5}
+      apply={async (key, count) => {
+        const { error, count: changed } = await supabase.from("websites")
+          .update({ [key]: count }, { count: "exact" }).eq("user_id", session.user.id);
+        return error
+          ? { ok: false, text: error.message }
+          : {
+              ok: true,
+              text: `Done. ${changed ?? "All"} websites now review ${count} products per ${key === "product_count" ? "new article" : "updated money post"}, starting with the next article.`,
+            };
+      }}
+    />
   );
 }
 

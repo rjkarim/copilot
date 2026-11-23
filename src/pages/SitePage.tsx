@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Link, Navigate, useParams } from "react-router-dom";
-import { fetchCategories, saveSleep, sleepLabel, supabase, useLive, writerError, type Article, type Category, type Site } from "../lib";
+import { fetchCategories, previewArticle, saveSleep, sleepLabel, supabase, useLive, type Article, type Category, type Site } from "../lib";
 import { Button, Card, ConfirmDialog, Field, Input, LiveStatus, Modal, Notice, Select, StatusBadge, Textarea, type ConfirmRequest } from "../ui";
 
 const COLS =
@@ -95,13 +95,12 @@ export default function SitePage() {
   }
   async function openPreview(a: Article) {
     // Published articles are read from the website itself; only unpublished text is kept in the database.
-    setPreview({ title: a.title ?? a.keyword, html: "<p>Loading the post from your website…</p>" });
-    const { data, error } = await supabase.functions.invoke("writer", { body: { action: "preview", article_id: a.id } });
-    if (error || !data?.ok) {
-      const text = error ? await writerError(error) : (data?.error ?? "Could not load the post.");
-      return setPreview({ title: a.title ?? a.keyword, html: `<p>${String(text).replace(/</g, "&lt;")} Use Open post to read it on the website.</p>` });
-    }
-    setPreview({ title: data.title ?? a.title ?? a.keyword, html: data.html });
+    const title = a.title ?? a.keyword;
+    setPreview({ title, html: "<p>Loading the post from your website…</p>" });
+    const r = await previewArticle(a.id);
+    setPreview(r.error
+      ? { title, html: `<p>${r.error.replace(/</g, "&lt;")} Use Open post to read it on the website.</p>` }
+      : { title: r.title ?? title, html: r.html ?? "" });
   }
 
   // A website that no longer exists (or a mistyped address) goes straight to the dashboard.
@@ -146,7 +145,7 @@ export default function SitePage() {
             <div className="mb-2 text-sm font-medium">Live progress</div>
             <LiveStatus site={site} />
             {site.wp_error && <div className="mt-3"><Notice kind="error">WordPress: {site.wp_error}</Notice></div>}
-            <SleepSetting site={site} lane="new" onDone={load} />
+            <SleepSetting site={site} onDone={load} />
             <ProductSetting site={site} onDone={load} />
           </Card>
           <KeywordForm site={site} onDone={load} />
@@ -240,85 +239,76 @@ export default function SitePage() {
   );
 }
 
-/** Sleep time with its own Save button. Can be changed at any moment; applies from the click. */
-function SleepSetting({ site, lane, onDone }: { site: Site; lane: "new" | "update"; onDone: () => void }) {
-  const saved = lane === "new" ? site.sleep_seconds : site.update_sleep_seconds;
-  const [value, setValue] = useState(String(saved ?? 60));
+/**
+ * A number with its own Save button (sleep time, products per article). It can be
+ * changed at any moment; `save` returns a success text or throws the error message.
+ */
+function NumberSetting({ label, saved, min, max, fallback, note, save, onDone }: {
+  label: string; saved: number | null; min: number; max?: number; fallback: number; note: string;
+  save: (value: number) => Promise<string>; onDone: () => void;
+}) {
+  const [value, setValue] = useState(String(saved ?? fallback));
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
-  const seconds = Math.max(0, Math.round(Number(value)) || 0);
+  const clamp = (v: number) => Math.min(max ?? Infinity, Math.max(min, v));
+  const number = clamp(Math.round(Number(value)) || fallback);
 
-  async function save() {
+  async function onSave() {
     setBusy(true);
-    const problem = await saveSleep(site.id, lane, seconds);
+    try {
+      setMsg({ kind: "ok", text: await save(number) });
+      setValue(String(number));
+    } catch (e) {
+      setMsg({ kind: "error", text: e instanceof Error ? e.message : String(e) });
+    }
     setBusy(false);
-    setMsg(problem ? { kind: "error", text: problem } : { kind: "ok", text: `Saved. Sleep time is now ${sleepLabel(seconds)}, effective from now.` });
     onDone();
   }
   return (
     <div className="mt-4 border-t border-slate-200 pt-4">
       <div className="flex flex-wrap items-end gap-2">
         <label className="block">
-          <span className="mb-1 block text-sm font-medium text-slate-700">
-            Sleep after each {lane === "new" ? "article" : "update"} (seconds)
-          </span>
-          <Input type="number" min={0} value={value} className="w-40"
+          <span className="mb-1 block text-sm font-medium text-slate-700">{label}</span>
+          <Input type="number" min={min} max={max} value={value} className="w-40"
             onChange={(e) => { setValue(e.target.value); setMsg(null); }} />
         </label>
-        <Button variant={seconds === saved ? "ghost" : "primary"} onClick={save} disabled={busy}>
+        <Button variant={number === saved ? "ghost" : "primary"} onClick={onSave} disabled={busy}>
           {busy ? "Saving…" : "Save"}
         </Button>
-        <span className="pb-2 text-xs text-slate-500">
-          Currently {sleepLabel(saved ?? 0)}. You can change it at any time, also while articles are being written.
-        </span>
+        <span className="pb-2 text-xs text-slate-500">{note}</span>
       </div>
       {msg && <div className="mt-2"><Notice kind={msg.kind}>{msg.text}</Notice></div>}
     </div>
   );
 }
 
-/** Products to review per article, with its own Save button. Applies to every keyword still waiting. */
-function ProductSetting({ site, onDone }: { site: Site; onDone: () => void }) {
-  const saved = site.product_count;
-  const [value, setValue] = useState(String(saved ?? 5));
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
-  const count = Math.min(10, Math.max(1, Math.round(Number(value)) || 5));
-
-  async function save() {
-    setBusy(true);
-    const { error } = await supabase.from("websites").update({ product_count: count }).eq("id", site.id);
-    setBusy(false);
-    setValue(String(count));
-    setMsg(
-      error
-        ? {
-            kind: "error",
-            text: error.message.includes("product_count")
-              ? "Database update needed: run supabase/migrations/009_product_count_per_website.sql in the Supabase SQL Editor, then try again."
-              : error.message,
-          }
-        : { kind: "ok", text: `Saved. Review articles now cover ${count} products, starting with the next article.` },
-    );
-    onDone();
-  }
+/** Sleep time after each new article. Applies from the click, also while an article is being written. */
+function SleepSetting({ site, onDone }: { site: Site; onDone: () => void }) {
   return (
-    <div className="mt-4 border-t border-slate-200 pt-4">
-      <div className="flex flex-wrap items-end gap-2">
-        <label className="block">
-          <span className="mb-1 block text-sm font-medium text-slate-700">Products to review per article</span>
-          <Input type="number" min={1} max={10} value={value} className="w-40"
-            onChange={(e) => { setValue(e.target.value); setMsg(null); }} />
-        </label>
-        <Button variant={count === saved ? "ghost" : "primary"} onClick={save} disabled={busy}>
-          {busy ? "Saving…" : "Save"}
-        </Button>
-        <span className="pb-2 text-xs text-slate-500">
-          Currently {saved ?? 5}. 10 are fetched from Amazon and the best are kept (1-10). Applies to all waiting keywords.
-        </span>
-      </div>
-      {msg && <div className="mt-2"><Notice kind={msg.kind}>{msg.text}</Notice></div>}
-    </div>
+    <NumberSetting
+      label="Sleep after each article (seconds)" saved={site.sleep_seconds} min={0} fallback={0} onDone={onDone}
+      note={`Currently ${sleepLabel(site.sleep_seconds ?? 0)}. You can change it at any time, also while articles are being written.`}
+      save={async (seconds) => {
+        const problem = await saveSleep(site.id, "new", seconds);
+        if (problem) throw new Error(problem);
+        return `Saved. Sleep time is now ${sleepLabel(seconds)}, effective from now.`;
+      }}
+    />
+  );
+}
+
+/** Products to review per article. Applies to every keyword still waiting. */
+function ProductSetting({ site, onDone }: { site: Site; onDone: () => void }) {
+  return (
+    <NumberSetting
+      label="Products to review per article" saved={site.product_count} min={1} max={10} fallback={5} onDone={onDone}
+      note={`Currently ${site.product_count ?? 5}. 10 are fetched from Amazon and the best are kept (1-10). Applies to all waiting keywords.`}
+      save={async (count) => {
+        const { error } = await supabase.from("websites").update({ product_count: count }).eq("id", site.id);
+        if (error) throw new Error(error.message);
+        return `Saved. Review articles now cover ${count} products, starting with the next article.`;
+      }}
+    />
   );
 }
 
@@ -329,7 +319,6 @@ function UpdatePanel({ site, onDone, confirm }: { site: Site; onDone: () => void
   const [includeFaq, setIncludeFaq] = useState(site.update_include_faq ?? true);
   const [error, setError] = useState("");
 
-  const needsDb = site.update_enabled === undefined;
   const settings = () => ({
     update_sleep_seconds: Math.max(0, Math.round(Number(sleep)) || 0),
     update_product_count: Math.min(10, Math.max(1, Math.round(Number(productCount)) || 5)),
@@ -385,7 +374,6 @@ function UpdatePanel({ site, onDone, confirm }: { site: Site; onDone: () => void
         </span>
       </div>
 
-      {needsDb && <Notice kind="error">Database update needed: run supabase/migrations/007_update_old_posts.sql in the Supabase SQL Editor, then reload.</Notice>}
       {error && <Notice kind="error">{error}</Notice>}
       {site.update_error && <Notice kind="error">Could not pick the next post: {site.update_error}</Notice>}
 
@@ -452,7 +440,7 @@ function UpdatePanel({ site, onDone, confirm }: { site: Site; onDone: () => void
             </Button>
           </>
         ) : (
-          <Button onClick={start} disabled={needsDb}>Start updating</Button>
+          <Button onClick={start}>Start updating</Button>
         )}
         {site.update_cursor && <Button variant="ghost" onClick={startOver}>Start over from the oldest</Button>}
         {site.update_enabled && <span className="text-xs text-slate-500">Stopping lets the post being written finish.</span>}
@@ -506,14 +494,7 @@ function KeywordForm({ site, onDone }: { site: Site; onDone: () => void }) {
       ({ error } = await supabase.from("articles").insert(rows));
     }
     setBusy(false);
-    if (error) {
-      const text = error.message.includes("product_count")
-        ? "Database update needed: run supabase/migrations/004_product_count.sql in the Supabase SQL Editor, then try again."
-        : error.message.includes("include_faq")
-          ? "Database update needed: run supabase/migrations/005_amazon_accounts_and_faq.sql in the Supabase SQL Editor, then try again."
-          : error.message;
-      return setMsg({ kind: "error", text });
-    }
+    if (error) return setMsg({ kind: "error", text: error.message });
     setText("");
     setMsg({
       kind: "ok",

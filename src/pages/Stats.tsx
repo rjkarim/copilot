@@ -48,7 +48,7 @@ export default function Stats() {
       ]);
       if (!alive) return;
       if (stats.error || timeline.error) {
-        return setError("Database update needed: run supabase/migrations/007_update_old_posts.sql in the Supabase SQL Editor, then reload.");
+        return setError((stats.error ?? timeline.error)!.message);
       }
       setError("");
       setRows((stats.data as Row[]).map((r) => ({ ...r, seconds_total: Number(r.seconds_total) })));

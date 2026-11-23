@@ -70,11 +70,7 @@ export default function WebsiteForm({ site, onClose }: { site?: Site; onClose: (
     setBusy(true);
     setError("");
     const fail = (message: string) => {
-      setError(
-        message.includes("schema cache") || message.includes("amazon_account")
-          ? "Database update needed: run supabase/migrations/005_amazon_accounts_and_faq.sql in the Supabase SQL Editor, then try again."
-          : message,
-      );
+      setError(message);
       setBusy(false);
     };
 

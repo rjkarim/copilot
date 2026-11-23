@@ -35,10 +35,7 @@ export default function Dashboard() {
     }
     const { data, error } = await supabase.from("website_overview").select("*").order("created_at");
     if (error) setError(`${error.message} — has the database setup SQL been run? See README.md.`);
-    else if (data.length > 0 && data[0].has_amazon_keys === undefined) {
-      setError("Database update needed: run supabase/migrations/003_site_amazon_and_categories.sql in the Supabase SQL Editor, then reload.");
-      setSites(data as Site[]);
-    } else {
+    else {
       setError("");
       setSites(data as Site[]);
     }

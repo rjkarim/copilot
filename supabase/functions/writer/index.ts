@@ -1,10 +1,12 @@
 // AffiliWriter background writer (Supabase Edge Function).
 //
 // Two kinds of callers:
-//  1. The database scheduler (x-worker-secret header): { action: "write", article_id }
-//     Writes one article and posts it to the website's WordPress.
-//  2. The logged-in user from the app: { action: "sync", website_id }
-//     Tests the WordPress connection and refreshes published/draft counts.
+//  1. The database scheduler (x-worker-secret header):
+//       write       { article_id }  write one article and publish it to WordPress
+//       update_next { website_id }  rewrite the website's next oldest post
+//  2. The logged-in user from the app (Authorization header):
+//       sync, categories, preview, test_wordpress, test_amazon, test_ai, resume_ai,
+//       set_sleep, set_sleep_all, clear_history
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 
@@ -26,47 +28,47 @@ const admin = createClient(
 );
 const WORKER_SECRET = Deno.env.get("WORKER_SECRET") ?? "";
 
+/** The message of any thrown value, shortened for storing or showing. */
+const errText = (e: unknown, max = 600) => String(e instanceof Error ? e.message : e).slice(0, max);
+/** An ISO time `seconds` from now. */
+const inSeconds = (seconds: number) => new Date(Date.now() + seconds * 1000).toISOString();
+/** One of this user's websites, or null. */
+async function ownSite(id: unknown, userId: string, columns = "*"): Promise<Row | null> {
+  const { data } = await admin.from("websites").select(columns).eq("id", id).eq("user_id", userId).maybeSingle();
+  return data as Row | null;
+}
+/** A tiny request of the same kind the writer sends; throws the provider's error if it does not answer. */
+const pingAI = (cfg: Row) => askOpenAI(cfg, "Reply with one JSON object only.", 'Return exactly this JSON: {"ok": true}');
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   const body = await req.json().catch(() => ({}));
 
-  if (body.action === "write") {
+  // From the scheduler. Both answer right away and keep working in the background.
+  if (body.action === "write" || body.action === "update_next") {
     if (!WORKER_SECRET || req.headers.get("x-worker-secret") !== WORKER_SECRET) {
       return json({ ok: false, error: "Unauthorized" }, 401);
     }
-    // Answer right away and keep writing in the background.
-    EdgeRuntime.waitUntil(writeArticle(String(body.article_id)));
-    return json({ ok: true }, 202);
-  }
-  // From the scheduler: rewrite the next oldest post of a website.
-  if (body.action === "update_next") {
-    if (!WORKER_SECRET || req.headers.get("x-worker-secret") !== WORKER_SECRET) {
-      return json({ ok: false, error: "Unauthorized" }, 401);
-    }
-    EdgeRuntime.waitUntil(updateNext(String(body.website_id)));
+    EdgeRuntime.waitUntil(
+      body.action === "write" ? writeArticle(String(body.article_id)) : updateNext(String(body.website_id)),
+    );
     return json({ ok: true }, 202);
   }
 
   const token = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "");
   const { data: auth } = await admin.auth.getUser(token);
   if (!auth?.user) return json({ ok: false, error: "Please log in again." }, 401);
+  const userId = auth.user.id;
 
   if (body.action === "sync") {
-    const { data: site } = await admin.from("websites").select("*")
-      .eq("id", body.website_id).eq("user_id", auth.user.id).maybeSingle();
+    const site = await ownSite(body.website_id, userId);
     if (!site) return json({ ok: false, error: "Website not found." });
     return json(await syncCounts(site));
   }
   // Connection tests from the website form. Uses what is typed in the form;
   // for an existing website, empty secret fields fall back to the saved values.
   if (body.action === "test_wordpress" || body.action === "test_amazon") {
-    let site: Row = {};
-    if (body.website_id) {
-      const { data } = await admin.from("websites").select("*")
-        .eq("id", body.website_id).eq("user_id", auth.user.id).maybeSingle();
-      site = data ?? {};
-    }
-    site.user_id = auth.user.id;
+    const site: Row = { ...((body.website_id && await ownSite(body.website_id, userId)) || {}), user_id: userId };
     // "new" = the form is adding a new Amazon account: test the typed credentials, not saved ones.
     if (body.fields?.amazon_account_id === "new") {
       site.amazon_account_id = null;
@@ -76,8 +78,8 @@ Deno.serve(async (req) => {
     const allowed = ["url", "wp_username", "wp_app_password", "amazon_account_id", "amazon_credential_id",
       "amazon_credential_secret", "amazon_version", "marketplace", "tracking_id"];
     for (const k of allowed) {
-      if (k === "amazon_account_id" && body.fields?.[k] === "new") continue;
       const v = body.fields?.[k];
+      if (k === "amazon_account_id" && v === "new") continue;
       if (typeof v === "string" && v.trim()) site[k] = v.trim();
     }
     try {
@@ -93,55 +95,61 @@ Deno.serve(async (req) => {
       const items = await searchAmazon(site, "water bottle");
       return json({ ok: true, message: `Connected to Amazon. A test search on ${site.marketplace} returned ${items.length} products for tracking ID ${site.tracking_id}.` });
     } catch (e) {
-      return json({ ok: false, error: String(e instanceof Error ? e.message : e).slice(0, 400) });
+      return json({ ok: false, error: errText(e, 400) });
     }
   }
-  // AI connection test from Settings. Uses what is typed; an empty key falls back to the saved one.
-  if (body.action === "test_ai") {
-    const { data: saved } = await admin.from("settings").select("*").eq("user_id", auth.user.id).maybeSingle();
+
+  // AI connection test (Settings) and Retry after the provider's limit was reached (dashboard card).
+  // The test uses what is typed in Settings; empty fields fall back to the saved values.
+  if (body.action === "test_ai" || body.action === "resume_ai") {
+    const { data: saved } = await admin.from("settings").select("*").eq("user_id", userId).maybeSingle();
     const cfg: Row = { ...(saved ?? {}) };
-    for (const k of ["openai_base_url", "openai_api_key", "openai_model"]) {
-      const v = body.fields?.[k];
-      if (typeof v === "string" && v.trim()) cfg[k] = v.trim();
+    if (body.action === "test_ai") {
+      for (const k of ["openai_base_url", "openai_api_key", "openai_model"]) {
+        const v = body.fields?.[k];
+        if (typeof v === "string" && v.trim()) cfg[k] = v.trim();
+      }
     }
     try {
-      if (!cfg.openai_api_key) throw new Error("Enter the API key first.");
-      // Same kind of request the article writer sends, just tiny.
-      await askOpenAI(cfg, "Reply with one JSON object only.", 'Return exactly this JSON: {"ok": true}');
-      const host = new URL(String(cfg.openai_base_url || "https://api.openai.com/v1")).host;
-      return json({ ok: true, message: `Connected to ${host}. Model ${cfg.openai_model} answered correctly.` });
+      if (!cfg.openai_api_key) {
+        throw new Error(body.action === "test_ai" ? "Enter the API key first." : "Add your AI API key in Settings.");
+      }
+      await pingAI(cfg);
     } catch (e) {
-      return json({ ok: false, error: String(e instanceof Error ? e.message : e).slice(0, 400) });
+      const error = errText(e, 400);
+      // Still limited: stay paused and show the provider's latest message on the card.
+      if (body.action === "resume_ai") {
+        await admin.from("settings")
+          .update({ ai_paused_at: saved?.ai_paused_at ?? new Date().toISOString(), ai_pause_message: error })
+          .eq("user_id", userId);
+      }
+      return json({ ok: false, error });
     }
-  }
-  // Retry after the AI provider's limit was reached: check that the provider answers again, and only then
-  // resume. If it is still limited, stay paused and report its message (the dashboard card stays).
-  if (body.action === "resume_ai") {
-    const { data: saved } = await admin.from("settings").select("*").eq("user_id", auth.user.id).maybeSingle();
-    const cfg: Row = { ...(saved ?? {}) };
-    try {
-      if (!cfg.openai_api_key) throw new Error("Add your AI API key in Settings.");
-      await askOpenAI(cfg, "Reply with one JSON object only.", 'Return exactly this JSON: {"ok": true}');
-    } catch (e) {
-      const message = String(e instanceof Error ? e.message : e).slice(0, 400);
-      await admin.from("settings").update({ ai_paused_at: saved?.ai_paused_at ?? new Date().toISOString(), ai_pause_message: message })
-        .eq("user_id", auth.user.id);
-      return json({ ok: false, error: message });
+    if (body.action === "resume_ai") {
+      // Websites that waited because of the pause are already due: the scheduler picks them up within 30 seconds.
+      await admin.from("settings").update({ ai_paused_at: null, ai_pause_message: null }).eq("user_id", userId);
+      return json({ ok: true });
     }
-    await admin.from("settings").update({ ai_paused_at: null, ai_pause_message: null }).eq("user_id", auth.user.id);
-    // Websites that were waiting because of the pause are already due, so the scheduler picks them up within 30 seconds.
-    return json({ ok: true });
+    const host = new URL(String(cfg.openai_base_url || "https://api.openai.com/v1")).host;
+    return json({ ok: true, message: `Connected to ${host}. Model ${cfg.openai_model} answered correctly.` });
   }
-  // Change a website's sleep time. It takes effect from this moment: the wait
-  // that is already running is re-timed from when the last article finished.
-  if (body.action === "set_sleep") {
-    const { data: site } = await admin.from("websites").select("id")
-      .eq("id", body.website_id).eq("user_id", auth.user.id).maybeSingle();
-    if (!site) return json({ ok: false, error: "Website not found." });
+
+  // Sleep time of one website, or of all of them (Settings). It takes effect from this moment:
+  // the wait that is already running is re-timed from when the last article finished.
+  if (body.action === "set_sleep" || body.action === "set_sleep_all") {
     const kind = body.lane === "update" ? "update" : "new";
-    const problem = await applySleep(site.id, kind, sleepSeconds(body.seconds));
-    return json(problem ? { ok: false, error: problem } : { ok: true });
+    const seconds = sleepSeconds(body.seconds);
+    const sites = body.action === "set_sleep"
+      ? [await ownSite(body.website_id, userId, "id")].filter(Boolean) as Row[]
+      : (await admin.from("websites").select("id").eq("user_id", userId)).data ?? [];
+    if (!sites.length && body.action === "set_sleep") return json({ ok: false, error: "Website not found." });
+    const failed = (await Promise.all(sites.map((s) => applySleep(s.id, kind, seconds)))).filter(Boolean);
+    if (failed.length) {
+      return json({ ok: false, error: sites.length === 1 ? failed[0] : `${failed.length} of ${sites.length} websites could not be changed: ${failed[0]}` });
+    }
+    return json({ ok: true, websites: sites.length, seconds });
   }
+
   // Settings > Free up database storage. Works through the finished articles of all
   // websites in small batches; the app calls again while "more" is true.
   //   mode "text": erase only the saved article text (the history list and statistics stay).
@@ -156,7 +164,7 @@ Deno.serve(async (req) => {
       let ids: string[] = [];
       if (all) {
         const { data } = await admin.from("articles").select("id")
-          .eq("user_id", auth.user.id).eq("kind", "new").in("status", ["completed", "failed"]).limit(500);
+          .eq("user_id", userId).eq("kind", "new").in("status", ["completed", "failed"]).limit(500);
         ids = (data ?? []).map((r) => r.id);
         if (ids.length) {
           const { error } = await admin.from("articles").delete().in("id", ids);
@@ -166,7 +174,7 @@ Deno.serve(async (req) => {
       // Updated posts keep their small record (so the updater never redoes them); only the text goes.
       if (ids.length === 0) {
         let q = admin.from("articles").select("id")
-          .eq("user_id", auth.user.id).eq("status", "completed").not("content_html", "is", null).limit(500);
+          .eq("user_id", userId).eq("status", "completed").not("content_html", "is", null).limit(500);
         if (all) q = q.eq("kind", "update");
         const { data } = await q;
         ids = (data ?? []).map((r) => r.id);
@@ -180,25 +188,15 @@ Deno.serve(async (req) => {
     }
     return json({ ok: true, removed, more });
   }
-  // The same for every website of this user in one go (Settings > Sleep time for all websites).
-  if (body.action === "set_sleep_all") {
-    const kind = body.lane === "update" ? "update" : "new";
-    const seconds = sleepSeconds(body.seconds);
-    const { data: sites } = await admin.from("websites").select("id").eq("user_id", auth.user.id);
-    const results = await Promise.all((sites ?? []).map((s) => applySleep(s.id, kind, seconds)));
-    const failed = results.filter(Boolean);
-    return json(failed.length
-      ? { ok: false, error: `${failed.length} of ${results.length} websites could not be changed: ${failed[0]}` }
-      : { ok: true, websites: results.length, seconds });
-  }
+
   // Preview of an article: unpublished text comes from the database, a published post is read from WordPress.
   if (body.action === "preview") {
     const { data: art } = await admin.from("articles").select("title,keyword,content_html,wp_post_id,website_id")
-      .eq("id", body.article_id).eq("user_id", auth.user.id).maybeSingle();
+      .eq("id", body.article_id).eq("user_id", userId).maybeSingle();
     if (!art) return json({ ok: false, error: "Article not found." });
     if (art.content_html) return json({ ok: true, title: art.title ?? art.keyword, html: art.content_html });
     if (!art.wp_post_id) return json({ ok: false, error: "This article has no text to show yet." });
-    const { data: site } = await admin.from("websites").select("*").eq("id", art.website_id).maybeSingle();
+    const site = await ownSite(art.website_id, userId);
     if (!site) return json({ ok: false, error: "Website not found." });
     try {
       const { api, headers } = wp(site);
@@ -212,17 +210,17 @@ Deno.serve(async (req) => {
         html: post?.content?.raw ?? post?.content?.rendered ?? "",
       });
     } catch (e) {
-      return json({ ok: false, error: String(e instanceof Error ? e.message : e).slice(0, 300) });
+      return json({ ok: false, error: errText(e, 300) });
     }
   }
+
   if (body.action === "categories") {
-    const { data: site } = await admin.from("websites").select("*")
-      .eq("id", body.website_id).eq("user_id", auth.user.id).maybeSingle();
+    const site = await ownSite(body.website_id, userId);
     if (!site) return json({ ok: false, error: "Website not found." });
     try {
       return json({ ok: true, categories: await wpCategories(site) });
     } catch (e) {
-      return json({ ok: false, error: String(e instanceof Error ? e.message : e).slice(0, 300) });
+      return json({ ok: false, error: errText(e, 300) });
     }
   }
   return json({ ok: false, error: "Unknown action." }, 400);
@@ -264,6 +262,8 @@ const RETRYABLE = /^(AI provider error|The AI |Could not reach the AI|Timed out)
 const MAX_ATTEMPTS = 4;
 // The AI account has run out of quota or credit (the provider says so in its error text).
 const PROVIDER_LIMIT = /^AI provider error.*(usage limit|limit has been reached|quota|insufficient (credit|balance|funds)|out of credit|billing|exceeded your current)/i;
+// Shown on articles held back while writing is paused (the dashboard reads this prefix).
+const PAUSED_NOTE = "AI provider limit reached. Paused until you click Retry on the dashboard.";
 
 async function writeArticle(id: string) {
   const { data: a } = await admin.from("articles").select("*").eq("id", id).maybeSingle();
@@ -274,6 +274,12 @@ async function writeArticle(id: string) {
   // cancel it (or it is retried), this run's updates stop having any effect.
   const set = (patch: Row) =>
     admin.from("articles").update(patch).eq("id", id).eq("status", "writing").eq("attempts", a.attempts);
+  // Back into the queue without using up an attempt (writing is paused): nothing is marked Failed.
+  const hold = (note: string, extra: Row = {}) =>
+    set({
+      status: "queued", step: null, progress: 0, finished_at: null, attempts: Math.max(0, a.attempts - 1), ...extra,
+      error: `${PAUSED_NOTE} ${note}`.slice(0, 600),
+    });
   const stillMine = async () => {
     const { data } = await admin.from("articles").select("status,attempts").eq("id", id).maybeSingle();
     return data?.status === "writing" && data.attempts === a.attempts;
@@ -301,10 +307,7 @@ async function writeArticle(id: string) {
   try {
     // Paused (the AI provider's limit was reached): do not start; put the article back and wait for Retry.
     if (cfg?.ai_paused_at) {
-      await set({
-        status: "queued", step: null, progress: 0, finished_at: null, attempts: Math.max(0, a.attempts - 1),
-        error: `AI provider limit reached. Paused until you click Retry on the dashboard. ${cfg.ai_pause_message ?? ""}`.slice(0, 600),
-      });
+      await hold(cfg.ai_pause_message ?? "");
       waitSeconds = 0;
       return;
     }
@@ -352,7 +355,7 @@ async function writeArticle(id: string) {
     });
     await syncCounts(site);
   } catch (e) {
-    const message = String(e instanceof Error ? e.message : e).slice(0, 600);
+    const message = errText(e);
     // Text that was written but not published is kept for the retry; nothing else is stored.
     const unpublished: Row = html ? { content_html: html, title: title || a.title || null } : {};
     if (message.startsWith("Amazon returned no products")) {
@@ -376,11 +379,7 @@ async function writeArticle(id: string) {
       await admin.from("settings")
         .update({ ai_paused_at: new Date().toISOString(), ai_pause_message: message })
         .eq("user_id", a.user_id);
-      // Back into the queue without using up an attempt: nothing is marked Failed.
-      await set({
-        status: "queued", step: null, progress: 0, finished_at: null, attempts: Math.max(0, a.attempts - 1), ...unpublished,
-        error: `AI provider limit reached. Paused until you click Retry on the dashboard. ${message}`.slice(0, 600),
-      });
+      await hold(message, unpublished);
       waitSeconds = 0;
     } else if (RETRYABLE.test(message) && a.attempts < MAX_ATTEMPTS) {
       // AI errors and timeouts are usually temporary: put it back in the queue and try again in 30 seconds.
@@ -395,7 +394,6 @@ async function writeArticle(id: string) {
   } finally {
     // Sleep time: this website's next keyword may not start before this moment.
     // (Not after a cancel, so a retry can start straight away.)
-    const wake = (seconds: number) => new Date(Date.now() + seconds * 1000).toISOString();
     // Read the sleep time again: it may have been changed while this article was being written.
     const { data: fresh } = await admin.from("websites")
       .select("sleep_seconds,update_sleep_seconds").eq("id", site.id).maybeSingle();
@@ -403,9 +401,9 @@ async function writeArticle(id: string) {
     if (isUpdate) {
       // The update lane has its own sleep time. After a cancel it may continue straight away.
       await admin.from("websites")
-        .update({ update_next_run_at: wake(cancelled ? 0 : (waitSeconds ?? now.update_sleep_seconds)) }).eq("id", site.id);
+        .update({ update_next_run_at: inSeconds(cancelled ? 0 : (waitSeconds ?? now.update_sleep_seconds)) }).eq("id", site.id);
     } else if (!cancelled) {
-      await admin.from("websites").update({ next_run_at: wake(waitSeconds ?? now.sleep_seconds) }).eq("id", site.id);
+      await admin.from("websites").update({ next_run_at: inSeconds(waitSeconds ?? now.sleep_seconds) }).eq("id", site.id);
     }
   }
 }
@@ -556,11 +554,10 @@ async function updateNext(siteId: string) {
   const { data: site } = await admin.from("websites").select("*").eq("id", siteId).maybeSingle();
   if (!site || !site.update_enabled) return;
   const patchSite = (patch: Row) => admin.from("websites").update(patch).eq("id", siteId);
-  const later = (seconds: number) => new Date(Date.now() + seconds * 1000).toISOString();
   // Paused because the AI provider's limit was reached: start nothing; the next run is due as soon as Retry resumes.
   const { data: pause } = await admin.from("settings").select("ai_paused_at").eq("user_id", site.user_id).maybeSingle();
   if (pause?.ai_paused_at) {
-    await patchSite({ update_next_run_at: later(0) });
+    await patchSite({ update_next_run_at: inSeconds(0) });
     return;
   }
 
@@ -601,13 +598,13 @@ async function updateNext(siteId: string) {
   } catch (e) {
     // Could not even pick a post (for example the WordPress login failed): show why and try again later.
     await patchSite({
-      update_error: String(e instanceof Error ? e.message : e).slice(0, 400),
-      update_next_run_at: later(Math.max(60, site.update_sleep_seconds)),
+      update_error: errText(e, 400),
+      update_next_run_at: inSeconds(Math.max(60, site.update_sleep_seconds)),
     });
     return;
   }
   if (articleId) await writeArticle(articleId);
-  else await patchSite({ update_next_run_at: later(0) });
+  else await patchSite({ update_next_run_at: inSeconds(0) });
 }
 
 /** The oldest published post not handled by this app yet, plus how many are left from there. */
@@ -647,23 +644,12 @@ async function wpNextOldPost(site: Row): Promise<{ post: Row; remaining: number 
  * post addresses (/2021/05/post-name/), the date is left alone, because changing
  * it would change the URL.
  */
-async function wpUpdatePost(site: Row, postId: number, title: string, content: string, excerpt: string, oldLink: string) {
-  const { api, headers } = wp(site);
+function wpUpdatePost(site: Row, postId: number, title: string, content: string, excerpt: string, oldLink: string) {
   const dateInUrl = /\/(19|20)\d{2}\/\d{1,2}(\/|$)/.test(oldLink);
-  const res = await wpFetch(`${api}/posts/${postId}`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      title, content, excerpt,
-      ...(dateInUrl ? {} : { date_gmt: new Date().toISOString().slice(0, 19) }),
-    }),
+  return wpSave(site, postId, {
+    title, content, excerpt,
+    ...(dateInUrl ? {} : { date_gmt: new Date().toISOString().slice(0, 19) }),
   });
-  if (!res.ok) throw new Error(await wpError(res));
-  const post = await res.json();
-  if (!post?.id || Array.isArray(post)) {
-    throw new Error("WordPress did not confirm the update. Check the website URL (https:// and www).");
-  }
-  return post as { id: number; link: string; status: string };
 }
 
 // ------------------------------------------------------------------ Amazon Creators API
@@ -859,7 +845,7 @@ const REVIEW_RULES =
   "and never claim to have bought or tested a product. Drawbacks must be real.";
 
 type Draft = { title: string; html: string; excerpt: string };
-type Report = (step: string, progress: number) => Promise<unknown>;
+type Report = (step: string, progress: number) => PromiseLike<unknown>;
 
 // An article is written as one short "plan" request followed by a few small
 // requests that run at the same time. This is far quicker than one huge request,
@@ -1179,24 +1165,31 @@ async function wpError(res: Response): Promise<string> {
   return `WordPress replied ${res.status}: ${data?.message ?? "request failed"}`;
 }
 
-async function wpCreatePost(
+function wpCreatePost(
   site: Row, title: string, content: string, excerpt: string, categoryId?: number | null, keyword?: string,
 ) {
+  return wpSave(site, null, {
+    title, content, excerpt, status: site.post_status,
+    // Short keyword-based URL (WordPress cleans it up), better for SEO than the full title.
+    ...(keyword ? { slug: keyword } : {}),
+    ...(categoryId ? { categories: [Number(categoryId)] } : {}),
+  });
+}
+
+/** Creates a post (postId null) or updates one. Throws unless WordPress confirms the save. */
+async function wpSave(site: Row, postId: number | null, fields: Row) {
   const { api, headers } = wp(site);
-  const res = await wpFetch(`${api}/posts`, {
+  const res = await wpFetch(postId ? `${api}/posts/${postId}` : `${api}/posts`, {
     method: "POST",
     headers,
-    body: JSON.stringify({
-      title, content, excerpt, status: site.post_status,
-      // Short keyword-based URL (WordPress cleans it up), better for SEO than the full title.
-      ...(keyword ? { slug: keyword } : {}),
-      ...(categoryId ? { categories: [Number(categoryId)] } : {}),
-    }),
+    body: JSON.stringify(fields),
   });
   if (!res.ok) throw new Error(await wpError(res));
   const post = await res.json();
-  // A real save returns the new post; a list or nothing means it never reached WordPress as a save.
-  if (!post?.id || Array.isArray(post)) throw new Error("WordPress did not confirm the new post. Check the website URL (https:// and www).");
+  // A real save returns the post; a list or nothing means it never reached WordPress as a save.
+  if (!post?.id || Array.isArray(post)) {
+    throw new Error(`WordPress did not confirm the ${postId ? "update" : "new post"}. Check the website URL (https:// and www).`);
+  }
   return post as { id: number; link: string; status: string };
 }
 
@@ -1242,13 +1235,13 @@ async function wpCount(site: Row, status: string): Promise<number> {
 async function syncCounts(site: Row) {
   const now = new Date().toISOString();
   try {
-    const [published, drafts] = [await wpCount(site, "publish"), await wpCount(site, "draft")];
+    const [published, drafts] = await Promise.all([wpCount(site, "publish"), wpCount(site, "draft")]);
     await admin.from("websites")
       .update({ wp_published: published, wp_drafts: drafts, wp_synced_at: now, wp_error: null })
       .eq("id", site.id);
     return { ok: true, published, drafts };
   } catch (e) {
-    const error = String(e instanceof Error ? e.message : e).slice(0, 300);
+    const error = errText(e, 300);
     await admin.from("websites").update({ wp_synced_at: now, wp_error: error }).eq("id", site.id);
     return { ok: false, error };
   }
