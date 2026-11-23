@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Link, Navigate, useParams } from "react-router-dom";
-import { fetchCategories, saveSleep, sleepLabel, supabase, useLive, type Article, type Category, type Site } from "../lib";
+import { fetchCategories, saveSleep, sleepLabel, supabase, useLive, writerError, type Article, type Category, type Site } from "../lib";
 import { Button, Card, ConfirmDialog, Field, Input, LiveStatus, Modal, Notice, Select, StatusBadge, Textarea, type ConfirmRequest } from "../ui";
 
 const COLS =
@@ -94,12 +94,14 @@ export default function SitePage() {
     });
   }
   async function openPreview(a: Article) {
-    const { data } = await supabase.from("articles").select("title,content_html").eq("id", a.id).single();
-    setPreview({
-      title: data?.title ?? a.keyword,
-      html: data?.content_html ||
-        "<p>The saved text of this article was deleted to free up storage. Use Open post to read it on the website.</p>",
-    });
+    // Published articles are read from the website itself; only unpublished text is kept in the database.
+    setPreview({ title: a.title ?? a.keyword, html: "<p>Loading the post from your website…</p>" });
+    const { data, error } = await supabase.functions.invoke("writer", { body: { action: "preview", article_id: a.id } });
+    if (error || !data?.ok) {
+      const text = error ? await writerError(error) : (data?.error ?? "Could not load the post.");
+      return setPreview({ title: a.title ?? a.keyword, html: `<p>${String(text).replace(/</g, "&lt;")} Use Open post to read it on the website.</p>` });
+    }
+    setPreview({ title: data.title ?? a.title ?? a.keyword, html: data.html });
   }
 
   // A website that no longer exists (or a mistyped address) goes straight to the dashboard.

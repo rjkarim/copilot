@@ -159,7 +159,7 @@ export function useLive(reload: () => void, key: string) {
 }
 
 /** Turns a failed call to the background writer into the real reason, in plain words. */
-async function writerError(error: unknown): Promise<string> {
+export async function writerError(error: unknown): Promise<string> {
   const res = (error as { context?: unknown })?.context;
   if (res instanceof Response) {
     const body = await res.clone().json().catch(() => null);

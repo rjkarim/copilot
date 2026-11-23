@@ -173,6 +173,30 @@ Deno.serve(async (req) => {
       ? { ok: false, error: `${failed.length} of ${results.length} websites could not be changed: ${failed[0]}` }
       : { ok: true, websites: results.length, seconds });
   }
+  // Preview of an article: unpublished text comes from the database, a published post is read from WordPress.
+  if (body.action === "preview") {
+    const { data: art } = await admin.from("articles").select("title,keyword,content_html,wp_post_id,website_id")
+      .eq("id", body.article_id).eq("user_id", auth.user.id).maybeSingle();
+    if (!art) return json({ ok: false, error: "Article not found." });
+    if (art.content_html) return json({ ok: true, title: art.title ?? art.keyword, html: art.content_html });
+    if (!art.wp_post_id) return json({ ok: false, error: "This article has no text to show yet." });
+    const { data: site } = await admin.from("websites").select("*").eq("id", art.website_id).maybeSingle();
+    if (!site) return json({ ok: false, error: "Website not found." });
+    try {
+      const { api, headers } = wp(site);
+      const res = await wpFetch(`${api}/posts/${art.wp_post_id}?context=edit&_fields=title,content`, { headers });
+      if (res.status === 404) return json({ ok: false, error: "This post no longer exists on the website." });
+      if (!res.ok) return json({ ok: false, error: await wpError(res) });
+      const post = await res.json();
+      return json({
+        ok: true,
+        title: post?.title?.raw ?? post?.title?.rendered ?? art.title ?? art.keyword,
+        html: post?.content?.raw ?? post?.content?.rendered ?? "",
+      });
+    } catch (e) {
+      return json({ ok: false, error: String(e instanceof Error ? e.message : e).slice(0, 300) });
+    }
+  }
   if (body.action === "categories") {
     const { data: site } = await admin.from("websites").select("*")
       .eq("id", body.website_id).eq("user_id", auth.user.id).maybeSingle();
@@ -248,10 +272,13 @@ async function writeArticle(id: string) {
   const productCount: number =
     Number(isUpdate ? site.update_product_count : site.product_count) || Number(a.product_count) || 5;
 
+  // The written text lives in the database only while it is not published yet (so a retry after a
+  // failed upload can reuse it). Once the post is on WordPress it is dropped to save storage.
+  let title: string = a.title ?? "";
+  let html: string = a.content_html ?? "";
+  let excerpt = "";
+
   try {
-    let title: string = a.title ?? "";
-    let html: string = a.content_html ?? "";
-    let excerpt = "";
 
     // A retry after a failed WordPress upload reuses the text already written.
     if (!html) {
@@ -276,7 +303,7 @@ async function writeArticle(id: string) {
       // Informative articles never carry an affiliate disclosure.
       if (a.type !== "review") html = noDisclosure(html);
       excerpt = draft.excerpt;
-      await set({ title, content_html: html, word_count: countWords(html) });
+      await set({ title, word_count: countWords(html) });
       // Separate update: if the token columns are missing, the article itself is still saved.
       if (cfg._usage.out > 0) await set({ tokens_in: cfg._usage.in, tokens_out: cfg._usage.out });
     }
@@ -291,13 +318,15 @@ async function writeArticle(id: string) {
       ? await wpUpdatePost(site, Number(a.wp_post_id), title, html, excerpt, String(a.wp_post_url ?? ""))
       : await wpCreatePost(site, title, html, excerpt, a.wp_category_id, a.keyword);
     await set({
-      status: "completed", step: "Done", progress: 100, error: null,
+      status: "completed", step: "Done", progress: 100, error: null, content_html: null,
       wp_post_id: post.id, wp_post_url: post.link, wp_status: post.status,
       finished_at: new Date().toISOString(),
     });
     await syncCounts(site);
   } catch (e) {
     const message = String(e instanceof Error ? e.message : e).slice(0, 600);
+    // Text that was written but not published is kept for the retry; nothing else is stored.
+    const unpublished: Row = html ? { content_html: html, title: title || a.title || null } : {};
     if (message.startsWith("Amazon returned no products")) {
       // Nothing to review for this keyword: remove it instead of listing it under Failed.
       const { data: gone } = await admin.from("articles").delete()
@@ -315,12 +344,12 @@ async function writeArticle(id: string) {
     } else if (RETRYABLE.test(message) && a.attempts < MAX_ATTEMPTS) {
       // AI errors and timeouts are usually temporary: put it back in the queue and try again in 30 seconds.
       await set({
-        status: "queued", step: null, progress: 0, finished_at: null,
+        status: "queued", step: null, progress: 0, finished_at: null, ...unpublished,
         error: `Retrying automatically in 30 seconds (attempt ${a.attempts + 1} of ${MAX_ATTEMPTS}). Last error: ${message}`.slice(0, 600),
       });
       waitSeconds = 30;
     } else {
-      await set({ status: "failed", step: null, error: message, finished_at: new Date().toISOString() });
+      await set({ status: "failed", step: null, error: message, finished_at: new Date().toISOString(), ...unpublished });
     }
   } finally {
     // Sleep time: this website's next keyword may not start before this moment.
