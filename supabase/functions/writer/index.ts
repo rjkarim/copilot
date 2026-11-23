@@ -114,6 +114,24 @@ Deno.serve(async (req) => {
       return json({ ok: false, error: String(e instanceof Error ? e.message : e).slice(0, 400) });
     }
   }
+  // Retry after the AI provider's limit was reached: check that the provider answers again, and only then
+  // resume. If it is still limited, stay paused and report its message (the dashboard card stays).
+  if (body.action === "resume_ai") {
+    const { data: saved } = await admin.from("settings").select("*").eq("user_id", auth.user.id).maybeSingle();
+    const cfg: Row = { ...(saved ?? {}) };
+    try {
+      if (!cfg.openai_api_key) throw new Error("Add your AI API key in Settings.");
+      await askOpenAI(cfg, "Reply with one JSON object only.", 'Return exactly this JSON: {"ok": true}');
+    } catch (e) {
+      const message = String(e instanceof Error ? e.message : e).slice(0, 400);
+      await admin.from("settings").update({ ai_paused_at: saved?.ai_paused_at ?? new Date().toISOString(), ai_pause_message: message })
+        .eq("user_id", auth.user.id);
+      return json({ ok: false, error: message });
+    }
+    await admin.from("settings").update({ ai_paused_at: null, ai_pause_message: null }).eq("user_id", auth.user.id);
+    // Websites that were waiting because of the pause are already due, so the scheduler picks them up within 30 seconds.
+    return json({ ok: true });
+  }
   // Change a website's sleep time. It takes effect from this moment: the wait
   // that is already running is re-timed from when the last article finished.
   if (body.action === "set_sleep") {
@@ -281,7 +299,15 @@ async function writeArticle(id: string) {
   let excerpt = "";
 
   try {
-
+    // Paused (the AI provider's limit was reached): do not start; put the article back and wait for Retry.
+    if (cfg?.ai_paused_at) {
+      await set({
+        status: "queued", step: null, progress: 0, finished_at: null, attempts: Math.max(0, a.attempts - 1),
+        error: `AI provider limit reached. Paused until you click Retry on the dashboard. ${cfg.ai_pause_message ?? ""}`.slice(0, 600),
+      });
+      waitSeconds = 0;
+      return;
+    }
     // A retry after a failed WordPress upload reuses the text already written.
     if (!html) {
       if (!cfg?.openai_api_key) throw new Error("Add your AI API key in Settings.");
@@ -344,14 +370,18 @@ async function writeArticle(id: string) {
       }
       waitSeconds = 0;
     } else if (PROVIDER_LIMIT.test(message)) {
-      // The AI account itself is out of quota or credit. Retrying the same article now is pointless and
-      // marking it Failed would make the updater skip posts one after another. Keep it waiting instead,
-      // without using up an attempt, and look again in 30 seconds.
+      // The AI account itself is out of quota or credit. Stop ALL content creation for this user
+      // (the scheduler skips paused users) and let the dashboard show an error card with a Retry
+      // button. The flag is set before the article is put back so the dashboard sees it at once.
+      await admin.from("settings")
+        .update({ ai_paused_at: new Date().toISOString(), ai_pause_message: message })
+        .eq("user_id", a.user_id);
+      // Back into the queue without using up an attempt: nothing is marked Failed.
       await set({
         status: "queued", step: null, progress: 0, finished_at: null, attempts: Math.max(0, a.attempts - 1), ...unpublished,
-        error: `AI provider limit reached. Waiting and retrying automatically every 30 seconds. ${message}`.slice(0, 600),
+        error: `AI provider limit reached. Paused until you click Retry on the dashboard. ${message}`.slice(0, 600),
       });
-      waitSeconds = 30;
+      waitSeconds = 0;
     } else if (RETRYABLE.test(message) && a.attempts < MAX_ATTEMPTS) {
       // AI errors and timeouts are usually temporary: put it back in the queue and try again in 30 seconds.
       await set({
@@ -527,6 +557,12 @@ async function updateNext(siteId: string) {
   if (!site || !site.update_enabled) return;
   const patchSite = (patch: Row) => admin.from("websites").update(patch).eq("id", siteId);
   const later = (seconds: number) => new Date(Date.now() + seconds * 1000).toISOString();
+  // Paused because the AI provider's limit was reached: start nothing; the next run is due as soon as Retry resumes.
+  const { data: pause } = await admin.from("settings").select("ai_paused_at").eq("user_id", site.user_id).maybeSingle();
+  if (pause?.ai_paused_at) {
+    await patchSite({ update_next_run_at: later(0) });
+    return;
+  }
 
   let articleId: string | null = null;
   try {

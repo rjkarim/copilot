@@ -57,6 +57,8 @@ export default function Settings() {
       updated_at: new Date().toISOString(),
     };
     if (openaiKey.trim()) patch.openai_api_key = openaiKey.trim();
+    // New AI settings (another key, model or provider): lift the "provider limit reached" pause so writing is tried again.
+    Object.assign(patch, { ai_paused_at: null, ai_pause_message: null });
     const { error } = await supabase.from("settings").update(patch).eq("user_id", session.user.id);
     setBusy(false);
     if (error) return setMsg({ kind: "error", text: error.message });

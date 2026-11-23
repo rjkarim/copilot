@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { sleepLabel, supabase, syncSite, useLive, type Site } from "../lib";
+import { resumeAi, sleepLabel, supabase, syncSite, useLive, type Site } from "../lib";
 import { Button, Card, ConfirmDialog, LiveStatus, Notice, type ConfirmRequest } from "../ui";
 import WebsiteForm from "./WebsiteForm";
 
@@ -19,16 +19,20 @@ export default function Dashboard() {
   const [form, setForm] = useState<{ site?: Site } | null>(null);
   const [syncing, setSyncing] = useState("");
   const [ask, setAsk] = useState<ConfirmRequest | null>(null);
-  // Set while the AI provider refuses requests because its quota or credit has run out.
+  // Set while writing is paused because the AI provider refused requests (its quota or credit ran out).
   const [aiLimit, setAiLimit] = useState<{ count: number; message: string } | null>(null);
+  const [resuming, setResuming] = useState(false);
+  const [resumeError, setResumeError] = useState("");
 
   async function load() {
-    supabase.from("articles").select("error", { count: "exact" })
-      .eq("status", "queued").like("error", "AI provider limit reached%").limit(1)
-      .then(({ data, count }) => {
-        const text = String(data?.[0]?.error ?? "").replace(/^AI provider limit reached\.[^.]*\.\s*/, "");
-        setAiLimit(count ? { count, message: text } : null);
-      });
+    const { data: st } = await supabase.from("settings").select("ai_paused_at,ai_pause_message").maybeSingle();
+    if (st?.ai_paused_at) {
+      const { count } = await supabase.from("articles").select("id", { count: "exact", head: true })
+        .eq("status", "queued").like("error", "AI provider limit reached%");
+      setAiLimit({ count: count ?? 0, message: String(st.ai_pause_message ?? "") });
+    } else {
+      setAiLimit(null);
+    }
     const { data, error } = await supabase.from("website_overview").select("*").order("created_at");
     if (error) setError(`${error.message} — has the database setup SQL been run? See README.md.`);
     else if (data.length > 0 && data[0].has_amazon_keys === undefined) {
@@ -145,9 +149,34 @@ export default function Dashboard() {
       {error && <Notice kind="error">{error}</Notice>}
       {aiLimit && (
         <Notice kind="error">
-          <b>The AI provider has stopped answering.</b> {aiLimit.count} article{aiLimit.count === 1 ? " is" : "s are"} waiting and
-          will retry automatically every 30 seconds, so nothing is lost or marked Failed. Provider message: {aiLimit.message}
-          {" "}Top up or upgrade the plan with your provider, or change the provider in Settings.
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0 flex-1 space-y-1">
+              <p><b>Writing is paused: the AI provider's limit was reached.</b></p>
+              {aiLimit.message && <p className="break-words">{aiLimit.message}</p>}
+              <p>
+                {aiLimit.count > 0
+                  ? `${aiLimit.count} article${aiLimit.count === 1 ? " is" : "s are"} waiting. `
+                  : ""}
+                Nothing is lost or marked Failed. Top up or upgrade your plan with the provider (or change the provider in
+                Settings), then click Retry to start creating content again.
+              </p>
+              {resumeError && <p className="font-medium">Still not working: {resumeError}</p>}
+            </div>
+            <Button
+              disabled={resuming}
+              onClick={async () => {
+                setResuming(true);
+                setResumeError("");
+                const res = await resumeAi();
+                setResuming(false);
+                if (res.ok) setAiLimit(null);
+                else setResumeError(res.text);
+                load();
+              }}
+            >
+              {resuming ? "Checking…" : "Retry"}
+            </Button>
+          </div>
         </Notice>
       )}
 

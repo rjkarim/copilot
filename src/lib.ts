@@ -235,6 +235,14 @@ export async function saveSleepForAll(lane: "new" | "update", seconds: number): 
   };
 }
 
+/** Retry after the AI provider's limit was reached: checks the provider answers, then resumes all writing. */
+export async function resumeAi(): Promise<{ ok: boolean; text: string }> {
+  const { data, error } = await supabase.functions.invoke("writer", { body: { action: "resume_ai" } });
+  if (error) return { ok: false, text: await writerError(error) };
+  if (!data?.ok) return { ok: false, text: data?.error ?? "The AI provider still does not answer." };
+  return { ok: true, text: "Writing has resumed." };
+}
+
 export function sleepLabel(seconds: number) {
   if (seconds < 60) return `${seconds}s`;
   if (seconds % 3600 === 0) return `${seconds / 3600}h`;
