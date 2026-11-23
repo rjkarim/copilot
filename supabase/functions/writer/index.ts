@@ -346,12 +346,12 @@ async function writeArticle(id: string) {
     } else if (PROVIDER_LIMIT.test(message)) {
       // The AI account itself is out of quota or credit. Retrying the same article now is pointless and
       // marking it Failed would make the updater skip posts one after another. Keep it waiting instead,
-      // without using up an attempt, and look again in 30 minutes.
+      // without using up an attempt, and look again in 30 seconds.
       await set({
         status: "queued", step: null, progress: 0, finished_at: null, attempts: Math.max(0, a.attempts - 1), ...unpublished,
-        error: `AI provider limit reached. Waiting and retrying automatically every 30 minutes. ${message}`.slice(0, 600),
+        error: `AI provider limit reached. Waiting and retrying automatically every 30 seconds. ${message}`.slice(0, 600),
       });
-      waitSeconds = 1800;
+      waitSeconds = 30;
     } else if (RETRYABLE.test(message) && a.attempts < MAX_ATTEMPTS) {
       // AI errors and timeouts are usually temporary: put it back in the queue and try again in 30 seconds.
       await set({

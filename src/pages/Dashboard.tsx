@@ -146,7 +146,7 @@ export default function Dashboard() {
       {aiLimit && (
         <Notice kind="error">
           <b>The AI provider has stopped answering.</b> {aiLimit.count} article{aiLimit.count === 1 ? " is" : "s are"} waiting and
-          will retry automatically every 30 minutes, so nothing is lost or marked Failed. Provider message: {aiLimit.message}
+          will retry automatically every 30 seconds, so nothing is lost or marked Failed. Provider message: {aiLimit.message}
           {" "}Top up or upgrade the plan with your provider, or change the provider in Settings.
         </Notice>
       )}
